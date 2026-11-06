@@ -87,7 +87,7 @@ The format and language reference is in the [user guide](docs/index.html). Examp
 
 ## Known issues
 
-- TODO: replace this list with your real known-bug list.
+- Savestates are unreliable on maps. Do not depend on them to play scripts back quickly. They work best for movement only.
 - Video rendering needs `ffmpeg` on your PATH.
 
 ## Contributing
