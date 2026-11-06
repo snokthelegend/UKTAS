@@ -1,0 +1,21 @@
+// The level load is the first framebulk. Press Play (F5): on tick 1 the script starts
+// loading 1-4 and then holds its clock. No ticks run while the level loads. The clock
+// resumes a few settle frames after the new scene is in, so the next line always starts
+// on the same tick, however long the load took.
+//
+// load_level does not wait for V1 to get control. The lines after it run from the moment
+// the level starts (for example while V1 falls in the elevator). The neutral line below
+// sets how far into the level movement begins; tune it by watching the run, or put
+// once:wait_control on a line to hold the clock until V1 can move.
+version 1
+host_frametime 0.008
+seed 1337
+start_type none
+wait_for_control false
+frames
+// first framebulk: the load itself, with no inputs (the clock holds here until 1-4 is in)
+----------|------|------|0.008|0.0|0.0|1|once:load_level 1-4
+// these ticks run once the level is in, while the elevator drops
+----------|------|------|0.008|0.0|0.0|120|
+// movement
+----------|f-----|------|0.008|0.0|0.0|100|

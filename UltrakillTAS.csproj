@@ -1,0 +1,172 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net472</TargetFramework>
+    <LangVersion>9.0</LangVersion>
+    <AssemblyName>UltrakillTAS</AssemblyName>
+    <RootNamespace>UltrakillTAS</RootNamespace>
+    <Version>1.1.0</Version>
+    <AssemblyVersion>1.1.0.0</AssemblyVersion>
+    <FileVersion>1.1.0.0</FileVersion>
+    <Product>ULTRAKILL TAS Tool</Product>
+    <Description>Deterministic tick-based TAS tool for ULTRAKILL (BepInEx 5 / HarmonyX).</Description>
+    <Company>ULTRAKILL TAS</Company>
+    <Copyright>MIT</Copyright>
+
+    <OutputType>Library</OutputType>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <AppendRuntimeIdentifierToOutputPath>false</AppendRuntimeIdentifierToOutputPath>
+    <PlatformTarget>x64</PlatformTarget>
+    <Prefer32Bit>false</Prefer32Bit>
+    <DebugType>portable</DebugType>
+    <Optimize>true</Optimize>
+    <Deterministic>true</Deterministic>
+    <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
+    <NoWarn>$(NoWarn);CS0649;CS0169</NoWarn>
+  </PropertyGroup>
+
+  <!--
+    Game location resolution order:
+      1. -p:GameDir="..." on the command line (build_and_deploy.bat does this)
+      2. ULTRAKILL_DIR environment variable
+      3. game_path.txt next to this project (written by the batch script)
+      4. common Steam install locations
+  -->
+  <PropertyGroup>
+    <!-- build_and_deploy.bat passes UltrakillPath; GameDir is the legacy/internal name. -->
+    <GameDir Condition="'$(UltrakillPath)' != ''">$(UltrakillPath)</GameDir>
+    <UltrakillPath Condition="'$(UltrakillPath)' == '' and '$(GameDir)' != ''">$(GameDir)</UltrakillPath>
+
+    <GameDir Condition="'$(GameDir)' == '' and '$(ULTRAKILL_DIR)' != ''">$(ULTRAKILL_DIR)</GameDir>
+    <GameDir Condition="'$(GameDir)' == '' and Exists('$(MSBuildProjectDirectory)\game_path.txt')">$([System.IO.File]::ReadAllText('$(MSBuildProjectDirectory)\game_path.txt').Trim())</GameDir>
+    <GameDir Condition="'$(GameDir)' == '' and Exists('C:\Program Files (x86)\Steam\steamapps\common\ULTRAKILL\ULTRAKILL.exe')">C:\Program Files (x86)\Steam\steamapps\common\ULTRAKILL</GameDir>
+    <GameDir Condition="'$(GameDir)' == '' and Exists('C:\Program Files\Steam\steamapps\common\ULTRAKILL\ULTRAKILL.exe')">C:\Program Files\Steam\steamapps\common\ULTRAKILL</GameDir>
+    <GameDir Condition="'$(GameDir)' == '' and Exists('D:\SteamLibrary\steamapps\common\ULTRAKILL\ULTRAKILL.exe')">D:\SteamLibrary\steamapps\common\ULTRAKILL</GameDir>
+
+    <ManagedDir>$(GameDir)\ULTRAKILL_Data\Managed</ManagedDir>
+    <BepInExCore>$(GameDir)\BepInEx\core</BepInExCore>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- BepInEx 5 + HarmonyX (shipped in BepInEx/core). Never copied to output. -->
+    <Reference Include="BepInEx">
+      <HintPath>$(BepInExCore)\BepInEx.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="0Harmony">
+      <HintPath>$(BepInExCore)\0Harmony.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+
+    <!-- Game code. The plugin uses reflection at runtime, but the reference is
+         kept so the same build resolves all game assemblies consistently. -->
+    <Reference Include="Assembly-CSharp">
+      <HintPath>$(ManagedDir)\Assembly-CSharp.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+
+    <!-- Unity assemblies from the installed game. -->
+    <Reference Include="UnityEngine">
+      <HintPath>$(ManagedDir)\UnityEngine.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.CoreModule">
+      <HintPath>$(ManagedDir)\UnityEngine.CoreModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.IMGUIModule">
+      <HintPath>$(ManagedDir)\UnityEngine.IMGUIModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.AnimationModule">
+      <HintPath>$(ManagedDir)\UnityEngine.AnimationModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.AIModule">
+      <HintPath>$(ManagedDir)\UnityEngine.AIModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.InputLegacyModule">
+      <HintPath>$(ManagedDir)\UnityEngine.InputLegacyModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.ParticleSystemModule">
+      <HintPath>$(ManagedDir)\UnityEngine.ParticleSystemModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.AudioModule">
+      <HintPath>$(ManagedDir)\UnityEngine.AudioModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.UIModule">
+      <HintPath>$(ManagedDir)\UnityEngine.UIModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.JSONSerializeModule">
+      <HintPath>$(ManagedDir)\UnityEngine.JSONSerializeModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.PhysicsModule">
+      <HintPath>$(ManagedDir)\UnityEngine.PhysicsModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.TextRenderingModule">
+      <HintPath>$(ManagedDir)\UnityEngine.TextRenderingModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.UI">
+      <HintPath>$(ManagedDir)\UnityEngine.UI.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Unity.InputSystem">
+      <HintPath>$(ManagedDir)\Unity.InputSystem.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- net472 targeting pack for machines without Visual Studio reference assemblies. -->
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Remove=".verify/**" />
+    <Compile Remove="tools/**" />
+    <Compile Remove="bin/**" />
+    <Compile Remove="obj/**" />
+  </ItemGroup>
+
+  <Target Name="ValidateGameInstall" BeforeTargets="BeforeBuild">
+    <Error Condition="'$(GameDir)' == ''"
+           Text="ULTRAKILL was not found. Pass -p:GameDir=&quot;C:\path\to\ULTRAKILL&quot;, set ULTRAKILL_DIR, or run build_and_deploy.bat." />
+    <Error Condition="!Exists('$(ManagedDir)\UnityEngine.CoreModule.dll')"
+           Text="UnityEngine.CoreModule.dll was not found under '$(ManagedDir)'. Check GameDir." />
+    <Error Condition="!Exists('$(ManagedDir)\Assembly-CSharp.dll')"
+           Text="Assembly-CSharp.dll was not found under '$(ManagedDir)'. Check UltrakillPath/GameDir." />
+    <Error Condition="!Exists('$(BepInExCore)\BepInEx.dll')"
+           Text="BepInEx 5 is not installed in '$(GameDir)'. Install BepInEx 5.4.x (x64) first." />
+    <Error Condition="!Exists('$(BepInExCore)\0Harmony.dll')"
+           Text="0Harmony.dll was not found. Reinstall BepInEx 5.4.x; HarmonyX ships in BepInEx\core." />
+    <Error Condition="!Exists('$(ManagedDir)\UnityEngine.AIModule.dll')"
+           Text="UnityEngine.AIModule.dll was not found. NavMeshAgent savestates require the standard Unity AI module." />
+    <Error Condition="!Exists('$(ManagedDir)\UnityEngine.AnimationModule.dll')"
+           Text="UnityEngine.AnimationModule.dll was not found. Animator savestates require the standard Unity Animation module." />
+    <Error Condition="!Exists('$(ManagedDir)\Unity.InputSystem.dll')"
+           Text="Unity.InputSystem.dll was not found. This ULTRAKILL build must use the Unity Input System package." />
+    <Error Condition="!Exists('$(ManagedDir)\UnityEngine.UI.dll')"
+           Text="UnityEngine.UI.dll was not found. Verify the ULTRAKILL installation is complete." />
+  </Target>
+
+  <!-- Optional: -p:DeployOnBuild=true copies the plugin straight into the game. -->
+  <Target Name="DeployToGame" AfterTargets="Build" Condition="'$(DeployOnBuild)' == 'true'">
+    <MakeDir Directories="$(GameDir)\BepInEx\plugins\UltrakillTAS" />
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(GameDir)\BepInEx\plugins\UltrakillTAS" />
+    <Copy SourceFiles="$(TargetDir)$(TargetName).pdb"
+          DestinationFolder="$(GameDir)\BepInEx\plugins\UltrakillTAS"
+          Condition="Exists('$(TargetDir)$(TargetName).pdb')" />
+  </Target>
+
+</Project>

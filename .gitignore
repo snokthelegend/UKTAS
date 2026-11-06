@@ -1,0 +1,10 @@
+bin/
+obj/
+dist/
+build_config.ini
+.vs/
+*.user
+*.suo
+*.pdb
+.freebuff/
+graphify-out/
