@@ -1,5 +1,7 @@
 # UKTAS: ULTRAKILL TAS Tool
 
+📖 **[Read the full guide](https://snokthelegend.github.io/UKTAS/)**: install, script language, and reference, rendered in your browser.
+
 A deterministic, tick-based tool-assisted speedrun (TAS) tool for [ULTRAKILL](https://store.steampowered.com/app/1229490/ULTRAKILL/), built as a BepInEx 5 plugin.
 
 You write down which inputs happen on every tick, and the game replays them exactly the same way every time. UKTAS includes a script editor with syntax highlighting, a recorder, savestates, a video renderer, and an on-screen HUD.
