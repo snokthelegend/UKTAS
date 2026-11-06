@@ -33,7 +33,7 @@ You write down which inputs happen on every tick, and the game replays them exac
 
 ## Install (players)
 
-Prebuilt downloads are on the [Releases](../../releases) page.
+Requires the latest version of ULTRAKILL. Prebuilt downloads are on the [Releases](../../releases) page.
 
 1. Install BepInEx 5.4.x (x64) next to `ULTRAKILL.exe`. Or run `install.bat` from the release, which can download it for you.
 2. Copy `UltrakillTAS.dll` into `BepInEx/plugins/UltrakillTAS/`.
@@ -87,16 +87,14 @@ The format and language reference is in the [user guide](docs/index.html). Examp
 
 ## Known issues
 
-- Savestates are unreliable on maps. Do not depend on them to play scripts back quickly. They work best for movement only.
-- Video rendering needs `ffmpeg` on your PATH.
+> [!WARNING]
+> **Savestates are very buggy with maps.** Do not rely on them to play scripts back quickly. They are only reliable for movement.
+
+- Video rendering requires `ffmpeg` on your PATH.
 
 ## Contributing
 
 Bug reports and pull requests are welcome. Open an issue first for large changes. Please describe your ULTRAKILL version and steps to reproduce.
-
-## Disclaimer
-
-UKTAS is an unofficial fan tool. It is not made by or affiliated with the ULTRAKILL developers, and it does not include any game assets or code.
 
 ## License
 
