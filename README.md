@@ -53,7 +53,7 @@ start_type load_level 8-3
 difficulty brutal
 ```
 
-See [`UKTAS_FORMAT_SPEC.txt`](UKTAS_FORMAT_SPEC.txt) for the format and [`UKTAS_LANG_FORMAT.md`](UKTAS_LANG_FORMAT.md) for the language. Example scripts are in [`examples/`](examples/).
+The format and language reference is in the [user guide](docs/index.html). Example scripts are in [`examples/`](examples/).
 
 ## Repository layout
 
