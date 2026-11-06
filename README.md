@@ -1,5 +1,21 @@
 # UKTAS: ULTRAKILL TAS Tool
 
+PREVIEWS:
+
+
+
+https://github.com/user-attachments/assets/2190ddca-7928-4914-b6d8-39d6e099b87e
+
+
+
+https://github.com/user-attachments/assets/94c3bf5d-84b0-4dbb-9d6c-449a1b5060dc
+
+
+
+https://github.com/user-attachments/assets/c9e5a952-3fa8-4ed3-9ff4-4253b639a1e9
+
+
+
 **[Read the full guide](https://snokthelegend.github.io/UKTAS/)**: install, script language, and reference, rendered in your browser.
 
 ## Preview
