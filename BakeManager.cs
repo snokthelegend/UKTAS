@@ -2561,11 +2561,26 @@ namespace UltrakillTAS
             }
             ApplySystemRng(data, index, ref f);
             ApplyPlayer(data, ref f);
+            // A game hitstop (or any scale 0 from the game) holds time: enemies, projectiles, doors
+            // and rooms do not move, animate or change on that tick, so the baked values for them
+            // wait for the first tick that runs at the game's scale. Compared, not forced, each tick.
+            if (enforcedTick && IsGameTimeStopped())
+                return;
             ApplyEnemies(data, ref f);
             // Skip-to-end: projectile keys cannot be followed through ticks that never ran.
             if (enforcedTick)
                 ApplyProjectiles(data, ref f);
             ApplyDoors(data, ref f);
+        }
+
+        /// <summary>
+        /// True while the game holds its own clock: a game hitstop (TimeController stop) or
+        /// Time.timeScale at 0. Read on the frame the tick ran, so it matches the scale the tick
+        /// was simulated with.
+        /// </summary>
+        static bool IsGameTimeStopped()
+        {
+            return TimeControllerHitstopPatch.Holding || Time.timeScale <= 0.0001f;
         }
 
         // ------------------------------------------------------------------

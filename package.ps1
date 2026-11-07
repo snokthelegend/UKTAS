@@ -4,12 +4,12 @@
 
 .DESCRIPTION
   1. dotnet build -c Release --no-incremental (the game folder is only used for references).
-  2. Creates dist\UltrakillTAS-<version>\ with a drop-in "ultrakill" folder that
+  2. Creates dist\UKTAS-<version>\ with a drop-in "ultrakill" folder that
      mirrors the ULTRAKILL game folder:
        ultrakill\BepInEx\plugins\UltrakillTAS\UltrakillTAS.dll
        ultrakill\BepInEx\config\ULTRAKILL-TAS\examples\*.uktas
      plus, beside it: INSTALL.txt, README.md, UKTAS_DOCS.html (from docs\index.html).
-  3. Zips it to dist\UltrakillTAS-<version>.zip.
+  3. Zips it to dist\UKTAS-<version>.zip.
 
   The user drags the "ultrakill" folder onto their game folder and Windows merges it.
   BepInEx and game files are not included. Nothing is copied into the game folder.
@@ -117,7 +117,7 @@ try {
     Ok 'Build succeeded.'
 
     # ---- 3. stage --------------------------------------------------------
-    $name = "UltrakillTAS-$version"
+    $name = "UKTAS-$version"
     $dist = Join-Path $Here 'dist'
     $stage = Join-Path $dist $name
     $zip = Join-Path $dist "$name.zip"

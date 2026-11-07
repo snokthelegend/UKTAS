@@ -316,8 +316,7 @@ namespace UltrakillTAS
             _time.SetHostFrametime(DefaultHostFrametime.Value);
             // Game hitstops count down per TAS tick instead of on the wall clock.
             TimeControllerHitstopPatch.Install(this, _time);
-            // Spawn door savestate hooks and the GUI's game helpers (leaderboard, cheats, death restart guard).
-            SpawnDoorTracker.Install(this);
+            // The GUI's game helpers (leaderboard, cheats, death restart guard).
             GameToggles.Install(this);
 
             _input = new InputPatcher(this, _bridge);
@@ -688,6 +687,8 @@ namespace UltrakillTAS
             if (_tickFrame == frame)
                 return;
             _tickFrame = frame;
+            // First thing in the tick, so an exception later in the tick cannot skip the game helpers.
+            GameToggles.Update();
             LastGuiMilliseconds = _guiMilliseconds;
             _guiMilliseconds = 0.0;
 
@@ -735,7 +736,6 @@ namespace UltrakillTAS
 
             if (_engine != null)
                 _engine.BeginFrame();
-            GameToggles.Update();
             if (_gui != null)
             {
                 // Speed is read every frame (the speedometer must not lag); the rest of the

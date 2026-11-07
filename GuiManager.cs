@@ -24,7 +24,86 @@ namespace UltrakillTAS
 
         const float WindowWidth = 900f;
         const float WindowHeight = 680f;
+        const float MinWindowWidth = 640f;
+        const float MinWindowHeight = 420f;
+        const float ResizeGrip = 8f;
         Rect _windowRect = new Rect(40, 40, WindowWidth, WindowHeight);
+        int _resizeEdge;          // 0 = none; bit flags: 1 left, 2 right, 4 top, 8 bottom
+        Vector2 _resizeStartMouse;
+        Rect _resizeStartRect;
+        Rect _resizedRect;
+        bool _hasResized;
+
+        // Keeps the TAS window fully on screen: size between the minimum and the screen size,
+        // position so no edge leaves the screen.
+        void ClampWindowToScreen()
+        {
+            float w = Mathf.Clamp(_windowRect.width, Mathf.Min(MinWindowWidth, Screen.width), Screen.width);
+            float h = Mathf.Clamp(_windowRect.height, Mathf.Min(MinWindowHeight, Screen.height), Screen.height);
+            float x = Mathf.Clamp(_windowRect.x, 0f, Mathf.Max(0f, Screen.width - w));
+            float y = Mathf.Clamp(_windowRect.y, 0f, Mathf.Max(0f, Screen.height - h));
+            _windowRect = new Rect(x, y, w, h);
+        }
+
+        // Edge and corner drags. Runs inside the window callback, so the mouse is in window space
+        // and the grips are the window's own border. Consumes the events it uses so the title-bar
+        // drag and the controls underneath never see them.
+        void HandleWindowResize()
+        {
+            Event e = Event.current;
+            float w = _windowRect.width;
+            float h = _windowRect.height;
+
+            if (e.type == EventType.MouseDown && e.button == 0 && _resizeEdge == 0)
+            {
+                Vector2 m = e.mousePosition;
+                int edge = 0;
+                if (m.x <= ResizeGrip) edge |= 1;
+                if (m.x >= w - ResizeGrip) edge |= 2;
+                if (m.y <= ResizeGrip) edge |= 4;
+                if (m.y >= h - ResizeGrip) edge |= 8;
+                if (edge != 0)
+                {
+                    _resizeEdge = edge;
+                    _resizeStartMouse = GUIUtility.GUIToScreenPoint(m);
+                    _resizeStartRect = _windowRect;
+                    // Holding a hot control keeps the drag and the release coming here even when the
+                    // pointer leaves the window.
+                    GUIUtility.hotControl = GUIUtility.GetControlID(FocusType.Passive);
+                    e.Use();
+                }
+            }
+            else if (_resizeEdge != 0 && (e.type == EventType.MouseDrag || e.type == EventType.MouseUp))
+            {
+                if (e.type == EventType.MouseUp)
+                {
+                    _resizeEdge = 0;
+                    GUIUtility.hotControl = 0;
+                    e.Use();
+                }
+                else
+                {
+                    Vector2 now = GUIUtility.GUIToScreenPoint(e.mousePosition);
+                    float dx = now.x - _resizeStartMouse.x;
+                    float dy = now.y - _resizeStartMouse.y;
+                    Rect r = _resizeStartRect;
+                    float left = r.xMin, right = r.xMax, top = r.yMin, bottom = r.yMax;
+                    if ((_resizeEdge & 1) != 0) left = Mathf.Min(r.xMin + dx, r.xMax - MinWindowWidth);
+                    if ((_resizeEdge & 2) != 0) right = Mathf.Max(r.xMax + dx, r.xMin + MinWindowWidth);
+                    if ((_resizeEdge & 4) != 0) top = Mathf.Min(r.yMin + dy, r.yMax - MinWindowHeight);
+                    if ((_resizeEdge & 8) != 0) bottom = Mathf.Max(r.yMax + dy, r.yMin + MinWindowHeight);
+                    // Stop at the screen edges: a grip can never push the window off screen.
+                    left = Mathf.Max(left, 0f);
+                    top = Mathf.Max(top, 0f);
+                    right = Mathf.Min(right, Screen.width);
+                    bottom = Mathf.Min(bottom, Screen.height);
+                    // GUI.Window hands back the rect it was given, so the new size is applied after it returns.
+                    _resizedRect = Rect.MinMaxRect(left, top, right, bottom);
+                    _hasResized = true;
+                    e.Use();
+                }
+            }
+        }
         int _tab;
         bool _visible = true;
         bool _loggedDraw;
@@ -363,20 +442,24 @@ namespace UltrakillTAS
                     _plugin.LogInfo("TAS window drawing at " + _windowRect.x + "," + _windowRect.y + ".");
                 }
                 EnsureTheme();
-                float windowHeight = Mathf.Min(WindowHeight, Mathf.Max(420f, Screen.height - 24f));
-                float windowWidth = Mathf.Min(WindowWidth, Mathf.Max(640f, Screen.width - 24f));
+                ClampWindowToScreen();
                 GUISkin previousSkin = GUI.skin;
                 GUI.skin = _skin;
                 try
                 {
-                    _windowRect = GUILayout.Window(0x554B5441, _windowRect, DrawWindow,
-                        "ULTRAKILL TAS Tool  v" + Plugin.PluginVersion + "   [Insert: hide]",
-                        GUILayout.Width(windowWidth), GUILayout.Height(windowHeight));
+                    _windowRect = GUI.Window(0x554B5441, _windowRect, DrawWindow,
+                        "ULTRAKILL TAS Tool  v" + Plugin.PluginVersion + "   [Insert: hide]");
                 }
                 finally
                 {
                     GUI.skin = previousSkin;
                 }
+                if (_hasResized)
+                {
+                    _windowRect = _resizedRect;
+                    _hasResized = false;
+                }
+                ClampWindowToScreen();
 
                 // A click outside the window gives up the keyboard focus, so a field that was typed
                 // in earlier no longer keeps the game's input captured once the player goes back to it.
@@ -500,6 +583,8 @@ namespace UltrakillTAS
         void DrawWindowContents()
         {
             Event current = Event.current;
+            // First, so the grips win over the controls drawn in the window's edges.
+            HandleWindowResize();
             _tipWindowMouse = current.mousePosition;
             if (current.type == EventType.Repaint)
                 _tipText = null;

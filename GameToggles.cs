@@ -73,6 +73,7 @@ namespace UltrakillTAS
                     _cheatsEnabledField = AccessTools.Field(_cheatsType, "cheatsEnabled");
                     _consentField = AccessTools.Field(_cheatsType, "consentScreen");
                     _activateCheats = AccessTools.Method(_cheatsType, "ActivateCheats", Type.EmptyTypes);
+                    ResolveCheatMembers(plugin);
                 }
             }
             catch (Exception ex)
@@ -103,10 +104,53 @@ namespace UltrakillTAS
             }
         }
 
+        /// <summary>
+        /// The cheat members are looked up by name. When a name does not match the game's, the
+        /// auto-enable silently does nothing, so any miss is logged and a close match is searched for.
+        /// </summary>
+        static void ResolveCheatMembers(Plugin plugin)
+        {
+            const BindingFlags all = BindingFlags.Instance | BindingFlags.Static |
+                                     BindingFlags.Public | BindingFlags.NonPublic;
+            if (_cheatsEnabledField == null)
+            {
+                foreach (FieldInfo f in _cheatsType.GetFields(all))
+                {
+                    if (f.FieldType == typeof(bool) && f.Name.IndexOf("cheat", StringComparison.OrdinalIgnoreCase) >= 0)
+                    {
+                        _cheatsEnabledField = f;
+                        break;
+                    }
+                }
+            }
+            if (_activateCheats == null)
+            {
+                foreach (MethodInfo m in _cheatsType.GetMethods(all))
+                {
+                    if (m.GetParameters().Length == 0 && m.Name.IndexOf("cheat", StringComparison.OrdinalIgnoreCase) >= 0 &&
+                        (m.Name.IndexOf("activ", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                         m.Name.IndexOf("enable", StringComparison.OrdinalIgnoreCase) >= 0))
+                    {
+                        _activateCheats = m;
+                        break;
+                    }
+                }
+            }
+            if (_cheatsEnabledField == null || _activateCheats == null)
+            {
+                plugin.LogWarning("Auto-enable cheats disabled: CheatsController members not found (cheatsEnabled: " +
+                                  (_cheatsEnabledField != null) + ", ActivateCheats: " + (_activateCheats != null) + ").");
+                return;
+            }
+            plugin.LogInfo("Auto-enable cheats: using " + _cheatsEnabledField.Name + " and " + _activateCheats.Name + ".");
+        }
+
         /// <summary>Once per frame from Plugin.Tick.</summary>
         public static void Update()
         {
-            if (_plugin == null)
+            // ReferenceEquals, not ==: Plugin is a MonoBehaviour, and the log shows its component
+            // was destroyed at startup. Unity's == then reports null and every helper here quits.
+            if (ReferenceEquals(_plugin, null))
                 return;
             try { UpdateLeaderboard(); }
             catch (Exception ex) { LogOnce(ref _leaderboardErrorLogged, "Auto-show leaderboard failed: " + ex.Message); }
@@ -222,18 +266,32 @@ namespace UltrakillTAS
         static void UpdateCheats()
         {
             if (_plugin.AutoEnableCheats == null || !_plugin.AutoEnableCheats.Value)
+            {
+                LogCheatsOnce("Auto-enable cheats: option is off (AutoEnableCheats=" +
+                              (_plugin.AutoEnableCheats != null ? _plugin.AutoEnableCheats.Value.ToString() : "null") + ").");
                 return;
+            }
             if (_cheatsEnabledField == null || _activateCheats == null)
+            {
+                LogCheatsOnce("Auto-enable cheats: members missing at runtime (cheatsEnabled " +
+                              (_cheatsEnabledField != null) + ", ActivateCheats " + (_activateCheats != null) + ").");
                 return;
+            }
             Component cheats = FindCached(_cheatsType, ref _cheats, ref _cheatsSearchAt);
             if (cheats == null)
+            {
+                LogCheatsOnce("Auto-enable cheats: no CheatsController in the loaded scenes yet; retrying.");
                 return;
+            }
 
             GameObject consent = _consentField != null ? _consentField.GetValue(cheats) as GameObject : null;
             bool consentOpen = consent != null && consent.activeSelf;
             bool enabled = (bool)_cheatsEnabledField.GetValue(cheats);
             if (enabled && !consentOpen)
+            {
+                LogCheatsOnce("Auto-enable cheats: cheatsEnabled is already true on " + cheats.gameObject.name + "; nothing to do.");
                 return;
+            }
 
             // The consent popup's "yes": idempotent, so a state that already has cheats on is
             // left as it is apart from closing a popup that is somehow open.
@@ -248,6 +306,17 @@ namespace UltrakillTAS
                 _cheatsLogged = true;
                 _plugin.LogInfo("Auto-enable cheats: cheats switched on (CheatsController.ActivateCheats).");
             }
+        }
+
+        static readonly System.Collections.Generic.HashSet<string> _cheatsLoggedMessages =
+            new System.Collections.Generic.HashSet<string>(StringComparer.Ordinal);
+
+        // Each distinct reason is logged once, so the reason in effect is always in the log.
+        static void LogCheatsOnce(string message)
+        {
+            if (!_cheatsLoggedMessages.Add(message))
+                return;
+            _plugin.LogInfo(message);
         }
 
         static void UnpauseGame()

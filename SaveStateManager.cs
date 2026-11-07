@@ -1330,10 +1330,6 @@ namespace UltrakillTAS
                     state.Warnings.Add("door " + door.name + ": " + ex.Message);
                 }
             }
-
-            // FinalDoor / FinalDoorOpener / OnLevelStart (the spawn door): SaveStateManager.Doors.cs.
-            try { CaptureSpawnDoors(state); }
-            catch (Exception ex) { state.Warnings.Add("spawn doors: " + ex.Message); }
         }
 
         void RestoreDoors(Savestate state, ref int restored, ref int missing)
@@ -1408,10 +1404,6 @@ namespace UltrakillTAS
                     _plugin.LogWarning("Door restore skipped: " + ex.Message);
                 }
             }
-
-            // After the leaves: the opener flags decide whether they open again.
-            try { RestoreSpawnDoors(state); }
-            catch (Exception ex) { _plugin.LogWarning("Spawn door restore skipped: " + ex.Message); }
         }
 
         // ------------------------------------------------------------------
@@ -1860,7 +1852,6 @@ namespace UltrakillTAS
             // Modules stop what must not keep running into the restored state (coroutines,
             // pending Invokes) before any value below is written.
             RunPreRestore(state);
-            SpawnDoorTracker.ClearAllRearm();
 
             // Order matters: things that wake or sleep objects come first (their OnEnable
             // then runs before any saved value is written), values next, effects last,

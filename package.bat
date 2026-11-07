@@ -2,8 +2,8 @@
 REM ===========================================================================
 REM  ULTRAKILL TAS Tool - release packager.
 REM
-REM  Builds Release, lays out dist\UltrakillTAS-<version>\ with a drop-in "ultrakill" folder
-REM  and zips it to dist\UltrakillTAS-<version>.zip.
+REM  Builds Release, lays out dist\UKTAS-<version>\ with a drop-in "ultrakill" folder
+REM  and zips it to dist\UKTAS-<version>.zip.
 REM
 REM  Optional:  package.bat "D:\Games\ULTRAKILL"     (explicit game folder)
 REM ===========================================================================
