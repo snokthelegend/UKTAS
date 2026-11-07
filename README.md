@@ -35,8 +35,8 @@ You write down which inputs happen on every tick, and the game replays them exac
 
 Requires the latest version of ULTRAKILL. Prebuilt downloads are on the [Releases](../../releases) page.
 
-1. Install BepInEx 5.4.x (x64) next to `ULTRAKILL.exe`. Or run `install.bat` from the release, which can download it for you.
-2. Copy `UltrakillTAS.dll` into `BepInEx/plugins/UltrakillTAS/`.
+1. Install BepInEx 5.4.x (x64) into ULTRAKILL once: unzip it next to `ULTRAKILL.exe`, start the game once, then close it.
+2. Open the release zip and drag the `ultrakill` folder onto your ULTRAKILL game folder. Click Replace/merge if asked. See `INSTALL.txt`.
 3. Start ULTRAKILL. Press `Insert` to open the TAS window.
 
 The full guide is in [`docs/index.html`](docs/index.html) (also published on GitHub Pages, see the link in the repo sidebar). It has a "Start here" section for new users and a reference for the script format.

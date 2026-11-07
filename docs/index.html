@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>UKTAS Guide</title>
-<meta name="description" content="Beginner guide and full reference for UKTAS 1.1.0, the ULTRAKILL TAS tool: what TAS is, your first 10 minutes, recording, savestates, the HUD, troubleshooting, the brute-force optimizer, video recording, and the complete .uktas script format.">
+<meta name="description" content="Beginner guide and full reference for UKTAS 1.2.0, the ULTRAKILL TAS tool: what TAS is, your first 10 minutes, recording, savestates, the HUD, troubleshooting, the brute-force optimizer, video recording, and the complete .uktas script format.">
 <style>
 :root{--bg:#0a0b0f;--bg2:#0c0e14;--panel:#141821;--panel2:#1a1f2b;--line:#252b38;--line2:#333b4c;--fg:#e9e7e3;--muted:#98a1b3;--accent:#ff5c5c;--accent2:#ffb547;--ok:#5ee6c4;--warn:#ffb547;--err:#ff8080;--c1:#5ee6c4;--c2:#7db7ff;--c3:#ff9f5e;--c4:#d9a7ff;--c5:#ffe066;--c6:#ff7aa2;--c7:#9be37a;--c8:#c4c8d0;--r:12px;--mono:ui-monospace,SFMono-Regular,"Cascadia Mono","IBM Plex Mono",Consolas,monospace;--sans:system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;color-scheme:dark}
 /* Dark is the base and the default. Light applies when the user picks Light, or picks System on a light system. */
@@ -369,7 +369,7 @@ main p code,main li code,main dd code,.note code,.big-warn code{overflow-wrap:an
       <a class="navlink" href="#tokens">Token index</a>
     </div>
     <div class="meta">
-      <b>UKTAS 1.1.0</b> (plugin version)<br>
+      <b>UKTAS 1.2.0</b> (plugin version)<br>
       Script header: <code>version 1</code><br>
       8 pipe-separated fields, BunnyMod XT layout
     </div>
@@ -378,7 +378,7 @@ main p code,main li code,main dd code,.note code,.big-warn code{overflow-wrap:an
   <main id="main">
     <!-- ================================================================ BEGINNER GUIDE -->
     <section id="top">
-      <div class="kicker">ULTRAKILL TAS tool · UKTAS 1.1.0</div>
+      <div class="kicker">ULTRAKILL TAS tool · UKTAS 1.2.0</div>
       <h1>UKTAS guide.<br>No TAS experience needed.</h1>
       <p class="lede">This page starts from zero. Read the "Start here" part from top to bottom once. The "Format reference" part further down is for looking things up later.</p>
       <p class="small"><b>Developed by snok</b></p>
@@ -483,7 +483,7 @@ main p code,main li code,main dd code,.note code,.big-warn code{overflow-wrap:an
         <dt>toast</dt><dd>A short message in the top-right corner of the screen.</dd>
         <dt>freecam</dt><dd>A free-flying camera that does not move V1 (<kbd class="k">F2</kbd>).</dd>
         <dt>autofuncs</dt><dd>Field 1 of a framebulk: helpers like autojump. Leave it as <code>----------</code> while you learn.</dd>
-        <dt>BepInEx</dt><dd>The mod loader that loads this tool into ULTRAKILL. The installer sets it up.</dd>
+        <dt>BepInEx</dt><dd>The mod loader that loads this tool into ULTRAKILL. You install it once (see INSTALL.txt).</dd>
         <dt>config file</dt><dd><code>BepInEx\config\com.tas.ultrakill.cfg</code>. All settings live there. The TAS window edits it for you.</dd>
       </dl>
     </section>
@@ -492,10 +492,10 @@ main p code,main li code,main dd code,.note code,.big-warn code{overflow-wrap:an
       <div class="shead"><span class="num">START</span><h2>Your first 10 minutes</h2><span class="sub">install → open → load → play → step</span></div>
       <p>Do these steps in order. Each step says what you should see. If you do not see it, go to <a href="#trouble">Something went wrong?</a></p>
       <ol class="steps">
-        <li><b>Install.</b> Extract the whole zip to a folder. Close ULTRAKILL. Double-click <code>install.bat</code>. The full install notes are in <code>README.md</code> next to this file.
-          <span class="see">a window that ends with "Done. Next steps:".</span></li>
+        <li><b>Install.</b> Install BepInEx 5 (x64) into ULTRAKILL once. Close ULTRAKILL. Open the zip and drag the <code>ultrakill</code> folder onto your ULTRAKILL game folder (the one with <code>ULTRAKILL.exe</code>). Click Replace/merge if asked. The full install notes are in <code>INSTALL.txt</code> next to this file.
+          <span class="see">the folders merge, and <code>BepInEx\plugins\UltrakillTAS\UltrakillTAS.dll</code> exists in your game folder.</span></li>
         <li><b>Start ULTRAKILL.</b> The first start after installing is slower than usual. That is normal.
-          <span class="see">a message in the top-right corner: "ULTRAKILL TAS Tool 1.1.0 loaded. Insert opens the TAS window."</span></li>
+          <span class="see">a message in the top-right corner: "ULTRAKILL TAS Tool 1.2.0 loaded. Insert opens the TAS window."</span></li>
         <li><b>Enter any level</b> from the game's own menu, for example 1-1.
           <span class="see">you are playing normally.</span></li>
         <li><b>Press <kbd class="k">Insert</kbd>.</b>
@@ -514,7 +514,7 @@ main p code,main li code,main dd code,.note code,.big-warn code{overflow-wrap:an
           <span class="see">after F11 the game is yours again and runs at normal speed.</span></li>
       </ol>
       <div class="note ok"><b>Done!</b> You loaded a script, played it, paused it and stepped it. Next: <a href="#firstscript">write your own script</a> or <a href="#recording">record one</a>.</div>
-      <div class="note"><b>Where are the files?</b> Your scripts live in <code>BepInEx\config\ULTRAKILL-TAS\</code> inside the game folder. The installer puts the examples in <code>BepInEx\config\ULTRAKILL-TAS\examples\</code>. In the Script file box, a short path like <code>examples\title_to_level.uktas</code> is looked up inside the script folder first, then in the game's working folder. The file list under the box shows the scripts in that folder and, in a second group called <b>examples</b>, the ones in its <code>examples</code> subfolder: click a name to load it. A full path such as <code>D:\Games\ULTRAKILL\BepInEx\config\ULTRAKILL-TAS\examples\title_to_level.uktas</code> also works.</div>
+      <div class="note"><b>Where are the files?</b> Your scripts live in <code>BepInEx\config\ULTRAKILL-TAS\</code> inside the game folder. The install puts the examples in <code>BepInEx\config\ULTRAKILL-TAS\examples\</code>. In the Script file box, a short path like <code>examples\title_to_level.uktas</code> is looked up inside the script folder first, then in the game's working folder. The file list under the box shows the scripts in that folder and, in a second group called <b>examples</b>, the ones in its <code>examples</code> subfolder: click a name to load it. A full path such as <code>D:\Games\ULTRAKILL\BepInEx\config\ULTRAKILL-TAS\examples\title_to_level.uktas</code> also works.</div>
     </section>
 
     <section id="window">
@@ -760,7 +760,7 @@ look_at off</pre>
       <div class="scroll"><table>
         <thead><tr><th style="width:24%">Problem</th><th style="width:30%">Likely cause</th><th>What to do</th></tr></thead>
         <tbody>
-          <tr><td>Install failed</td><td>No internet / GitHub blocked (BepInEx download), or PowerShell blocked the script.</td><td>Run <code>install.bat</code> (not <code>install.ps1</code> by double-click). From PowerShell use <code>powershell -ExecutionPolicy Bypass -File .\install.ps1</code>. If BepInEx cannot download, install it by hand (see <code>README.md</code>, "Manual install").</td></tr>
+          <tr><td>Files did not copy</td><td>The <code>ultrakill</code> folder was dropped in the wrong place, or the game is running.</td><td>Close ULTRAKILL. Drop the <code>ultrakill</code> folder onto the folder that contains <code>ULTRAKILL.exe</code>, so you get <code>BepInEx\plugins\UltrakillTAS\UltrakillTAS.dll</code> there. Click Replace/merge and accept the admin prompt if asked. BepInEx 5 must already be installed (see <code>INSTALL.txt</code>).</td></tr>
           <tr><td>No "loaded" message at start</td><td>BepInEx is not loading.</td><td>Check that <code>winhttp.dll</code> is next to <code>ULTRAKILL.exe</code>. Read <code>BepInEx\LogOutput.log</code>. The first start after install is slow; wait.</td></tr>
           <tr><td>Insert does nothing / window does not open</td><td>Plugin not loaded, or Insert was rebound.</td><td>Look for the "loaded" message first. Check the Keybinds tab or the <code>3. Keybinds</code> section of the config file. Only one <code>UltrakillTAS.dll</code> may exist under <code>BepInEx\plugins</code>.</td></tr>
           <tr><td>Game does not move / my keys do nothing</td><td>The pointer is over the TAS window, or a text box has focus. Or a script is running (your real keys are ignored during a run).</td><td>Press Insert to close the window, or move the pointer off it (a text box with focus keeps blocking until the window closes). Press <kbd class="k">F11</kbd> to stop a run. If "PAUSED" shows, press <kbd class="k">F5</kbd>.</td></tr>
@@ -786,7 +786,7 @@ look_at off</pre>
         <p class="small muted">The framebulk layout, the speedometer style and commands such as <code>bxt_timer_start</code> and <code>bxt_rec</code> follow bunnymodXT conventions.</p>
       </div>
       <h3 id="version">About the version numbers</h3>
-      <p>The tool is <b>UKTAS 1.1.0</b>; that is the plugin version shown in the "loaded" message. The script file format is <b>version 1</b>; that is the <code>version 1</code> line at the top of every script. They are separate numbers.</p>
+      <p>The tool is <b>UKTAS 1.2.0</b>; that is the plugin version shown in the "loaded" message. The script file format is <b>version 1</b>; that is the <code>version 1</code> line at the top of every script. They are separate numbers.</p>
     </section>
 
     <!-- ================================================================ FORMAT REFERENCE -->
@@ -2405,7 +2405,7 @@ look_at off</pre></div>
     </div>
 
     <footer>
-      <p><b>UKTAS 1.1.0</b> · script format <code>version 1</code> · developed by snok. Shipped as <code>UKTAS_DOCS.html</code> next to <code>README.md</code> and <code>install.bat</code>.</p>
+      <p><b>UKTAS 1.2.0</b> · script format <code>version 1</code> · developed by snok. Shipped as <code>UKTAS_DOCS.html</code> next to <code>README.md</code> and <code>INSTALL.txt</code>.</p>
       <p>Thanks to YALTER (bunnymodXT) and yuu (UNItas) for the tools and ideas this project builds on.</p>
       <p>Single file, no dependencies. Search, the entity finder and the framebulk builder all run locally in this page.</p>
     </footer>

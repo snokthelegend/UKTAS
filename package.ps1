@@ -4,13 +4,15 @@
 
 .DESCRIPTION
   1. dotnet build -c Release --no-incremental (the game folder is only used for references).
-  2. Creates dist\UltrakillTAS-<version>\ laid out as a BepInEx folder:
-       BepInEx\plugins\UltrakillTAS\UltrakillTAS.dll
-       BepInEx\plugins\UltrakillTAS\examples\*.uktas
-       UKTAS_DOCS.html (from docs\), README.md, install.bat, install.ps1
+  2. Creates dist\UltrakillTAS-<version>\ with a drop-in "ultrakill" folder that
+     mirrors the ULTRAKILL game folder:
+       ultrakill\BepInEx\plugins\UltrakillTAS\UltrakillTAS.dll
+       ultrakill\BepInEx\config\ULTRAKILL-TAS\examples\*.uktas
+     plus, beside it: INSTALL.txt, README.md, UKTAS_DOCS.html (from docs\index.html).
   3. Zips it to dist\UltrakillTAS-<version>.zip.
 
-  Nothing is copied into the game folder.
+  The user drags the "ultrakill" folder onto their game folder and Windows merges it.
+  BepInEx and game files are not included. Nothing is copied into the game folder.
 
 .PARAMETER GameDir
   The folder that contains ULTRAKILL.exe (needed to resolve references while building).
@@ -124,8 +126,10 @@ try {
     if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
     if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
 
-    $pluginDir = Join-Path $stage 'BepInEx\plugins\UltrakillTAS'
-    $exDir = Join-Path $pluginDir 'examples'
+    $gameRoot = Join-Path $stage 'ultrakill'
+    $pluginDir = Join-Path $gameRoot 'BepInEx\plugins\UltrakillTAS'
+    $exDir = Join-Path $gameRoot 'BepInEx\config\ULTRAKILL-TAS\examples'
+    New-Item -ItemType Directory -Force -Path $pluginDir | Out-Null
     New-Item -ItemType Directory -Force -Path $exDir | Out-Null
 
     Copy-Item -LiteralPath $dll -Destination (Join-Path $pluginDir 'UltrakillTAS.dll') -Force
@@ -135,10 +139,9 @@ try {
     foreach ($f in $examples) { Copy-Item -LiteralPath $f.FullName -Destination $exDir -Force }
 
     $single = @(
+        @{ From = 'INSTALL.txt';           To = 'INSTALL.txt' },
         @{ From = 'README.md';             To = 'README.md' },
-        @{ From = 'docs\UKTAS_DOCS.html';  To = 'UKTAS_DOCS.html' },
-        @{ From = 'install.bat';           To = 'install.bat' },
-        @{ From = 'install.ps1';           To = 'install.ps1' }
+        @{ From = 'docs\index.html';       To = 'UKTAS_DOCS.html' }
     )
     foreach ($s in $single) {
         $src = Join-Path $Here $s.From
@@ -148,7 +151,19 @@ try {
     Ok "Staged: $stage"
 
     # ---- 4. zip ----------------------------------------------------------
-    Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip -CompressionLevel Optimal
+    # Entries are added by hand (not Compress-Archive / CreateFromDirectory) so names always use
+    # forward slashes, which is what the zip spec and every unzip tool expect.
+    Add-Type -AssemblyName System.IO.Compression
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $archive = [System.IO.Compression.ZipFile]::Open($zip, [System.IO.Compression.ZipArchiveMode]::Create)
+    try {
+        $root = (Get-Item -LiteralPath $stage).FullName.TrimEnd('\') + '\'
+        foreach ($f in Get-ChildItem -LiteralPath $stage -Recurse -File) {
+            $entryName = $f.FullName.Substring($root.Length).Replace('\', '/')
+            [void][System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($archive, $f.FullName, $entryName, [System.IO.Compression.CompressionLevel]::Optimal)
+        }
+    }
+    finally { $archive.Dispose() }
     if (-not (Test-Path -LiteralPath $zip)) { throw 'Compress-Archive did not create the zip.' }
     $kb = [math]::Round((Get-Item -LiteralPath $zip).Length / 1KB, 1)
     Ok "Zip created ($kb KB)."
