@@ -74,6 +74,14 @@ try {
     $csproj = Join-Path $Here 'UltrakillTAS.csproj'
     if (-not (Test-Path -LiteralPath $csproj)) { throw 'UltrakillTAS.csproj was not found next to package.ps1.' }
 
+    # No argument: use the GAME_DIR that build_and_deploy.bat saved in build_config.ini.
+    if ([string]::IsNullOrWhiteSpace($GameDir)) {
+        $cfg = Join-Path $Here 'build_config.ini'
+        if (Test-Path -LiteralPath $cfg) {
+            $line = Get-Content -LiteralPath $cfg | Where-Object { $_ -match '^\s*GAME_DIR\s*=' } | Select-Object -First 1
+            if ($line) { $GameDir = ($line -replace '^\s*GAME_DIR\s*=\s*', '').Trim() }
+        }
+    }
     if ([string]::IsNullOrWhiteSpace($GameDir)) { throw 'No game folder given. Pass it: package.bat "<path to ULTRAKILL folder>" (or set the ULTRAKILL_DIR environment variable).' }
     $game = $GameDir.Trim().Trim('"').TrimEnd('\')
     if (-not (Test-Path -LiteralPath (Join-Path $game 'ULTRAKILL.exe'))) {
