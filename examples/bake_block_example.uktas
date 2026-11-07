@@ -1,0 +1,25 @@
+// ULTRAKILL TAS - minimal TAS baking example.
+//
+// The ticks between bake_start and bake_end form one bake block. The first run records
+// the world state at the end of every tick into "bake_block_example-room1.ukbake" next to
+// this file. Later runs use it when the General tab's Baking card says so:
+//   Enable Baked Playback      inputs still run, then the baked state is applied each tick
+//   Verify Raw Playback        pure live playback, first drift per block is reported
+//   Skip Baked Blocks to End   jump to the block's last baked frame, continue live after it
+// Any edit to the header or to a line before bake_end changes the block's checksum, and the
+// block is recorded again on the next run.
+version 1
+host_frametime 0.008
+seed 1337
+start_type restart_mission
+frames
+// settle on the ground
+----------|------|------|-|90.0|0.0|20|
+bake_start room1
+// run forward, jump, keep running
+----------|f-----|------|-|90.0|0.0|40|
+----------|f-----|j-----|-|-|-|1|
+----------|f-----|------|-|-|-|60|
+bake_end
+// live again after the block
+----------|------|------|-|-|-|20|

@@ -1,0 +1,66 @@
+# --- existing entries ---
+bin/
+obj/
+*.log
+*.tmp
+logs/
+.vs/
+
+# --- local config (contains local game path) ---
+build_config.ini
+game_path.txt
+
+# --- build / build output / release packaging ---
+build_and_deploy.log
+dist/
+*.zip
+*.dll
+*.pdb
+*.nupkg
+*.user
+*.suo
+*.userprefs
+
+# --- IDE / tooling state ---
+.vscode/
+.idea/
+.claude/
+graphify-out/
+
+# --- local-only helper scripts ---
+push_to_github.bat
+scratchpad*
+*.scratch
+
+# --- BepInEx logs, saves, exports, recordings, screenshots ---
+LogOutput.log
+*.sav
+*.save
+*.savestate
+*.mp4
+*.mkv
+*.avi
+*.mov
+*.webm
+*.wav
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+Screenshots/
+Recordings/
+Exports/
+exports/
+saves/
+
+# --- OS junk ---
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# --- personal scripts (not for the public repo) ---
+double_dead.uktas
+
+# --- generated baked-state data (machine-specific, can be large) ---
+*.ukbake

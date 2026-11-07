@@ -1,0 +1,37 @@
+// ULTRAKILL TAS - title screen to a level, driven entirely by the menu pointer.
+//
+// HOW TO ADAPT THIS
+//  1. Press Insert, open the HUD, and hover your real mouse over a button.
+//     The HUD "mouse" row shows the position, e.g.  960,540  (0.500 0.519)
+//     The pair in brackets is what mousef wants; the plain numbers are for mouse.
+//  2. Replace the glidef targets below with your own measurements.
+//  3. Put the file in BepInEx/config/ULTRAKILL-TAS and load it, or set it as
+//     "Autoload script" with "Autoplay on boot" to run it from game launch
+//     (then use  start_type none  instead of  main_menu).
+//
+// Commands run on EVERY tick of a line, so anything that should happen once
+// (moves, clicks, waits) is prefixed with once:
+version 1
+host_frametime 0.01667
+seed 1337
+start_type main_menu
+wait_for_control false
+frames
+// let the title screen settle
+----------|------|------|-|0.0|0.0|60|
+// sweep the pointer to the PLAY button over 40 ticks, then click it
+----------|------|------|-|0.0|0.0|40|once:glidef 0.50 0.38 40
+----------|------|------|-|0.0|0.0|1|once:click
+// the level panel opens: wait, sweep to the level, click
+----------|------|------|-|0.0|0.0|50|
+----------|------|------|-|0.0|0.0|30|once:glidef 0.50 0.25 30
+----------|------|------|-|0.0|0.0|1|once:click
+// hold the script clock until the level has loaded, then until V1 gets control
+----------|------|------|-|0.0|0.0|1|once:wait_scene
+----------|------|------|-|0.0|0.0|1|once:wait_control
+// gameplay: run forward, switch to the shotgun (slot 2), jump, fire, cycle the fist
+----------|f-----|------|-|0.0|0.0|60|
+----------|f-----|-----w2|-|0.0|0.0|1|
+----------|f-----|j-----|-|0.0|0.0|10|
+----------|f-----|-1----|-|0.0|0.0|1|
+----------|f-----|------x|-|0.0|0.0|1|

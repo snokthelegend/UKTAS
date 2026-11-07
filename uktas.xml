@@ -1,0 +1,69 @@
+<NotepadPlus>
+    <UserLang name="uktas" ext="uktas hltas" udlVersion="2.1">
+        <Settings>
+            <!-- Parser is case-insensitive (UktasSyntax uses OrdinalIgnoreCase), so highlighting is too. -->
+            <Global caseIgnored="yes" allowFoldOfComments="no" foldCompact="no" forcePureLC="0" decimalSeparator="0" />
+            <Prefix Keywords1="no" Keywords2="no" Keywords3="no" Keywords4="no" Keywords5="no" Keywords6="no" Keywords7="no" Keywords8="no" />
+        </Settings>
+        <KeywordLists>
+            <!-- // and # start a comment (UktasSyntax.CommentStart) -->
+            <Keywords name="Comments">00// 00#</Keywords>
+            <Keywords name="Numbers, prefix1"></Keywords>
+            <Keywords name="Numbers, prefix2"></Keywords>
+            <Keywords name="Numbers, extras1"></Keywords>
+            <Keywords name="Numbers, extras2"></Keywords>
+            <Keywords name="Numbers, suffix1"></Keywords>
+            <Keywords name="Numbers, suffix2"></Keywords>
+            <Keywords name="Numbers, range"></Keywords>
+            <!-- Framebulk column dividers and command separators -->
+            <Keywords name="Operators1">| ; :</Keywords>
+            <Keywords name="Operators2"></Keywords>
+            <Keywords name="Folders in code1, open"></Keywords>
+            <Keywords name="Folders in code1, middle"></Keywords>
+            <Keywords name="Folders in code1, close"></Keywords>
+            <Keywords name="Folders in code2, open"></Keywords>
+            <Keywords name="Folders in code2, middle"></Keywords>
+            <Keywords name="Folders in code2, close"></Keywords>
+            <Keywords name="Folders in comment, open"></Keywords>
+            <Keywords name="Folders in comment, middle"></Keywords>
+            <Keywords name="Folders in comment, close"></Keywords>
+            <!-- Header keys (UktasSyntax.HeaderKeys) -->
+            <Keywords name="Keywords1">version seed rng_seed random_seed host_frametime frametime default_frametime ft demo save savestate start_type starttype start load load_level loadlevel load_command loadcommand wait_for_control wait_for_player_control wait_for_player waitforcontrol fist start_fist difficulty weapons loadout author description desc record_video record_fps blend_samples shutter_angle frames</Keywords>
+            <!-- Header values (UktasSyntax.Values) -->
+            <Keywords name="Keywords2">none current restart_mission main_menu load_level load_state true false harmless lenient standard violent brutal knuckleblaster parry</Keywords>
+            <!-- Commands run from a framebulk's command field or a load_command line -->
+            <Keywords name="Keywords3">bxt_timer_start bxt_timer_stop bxt_timer_reset timer_start timer_stop timer_reset load_state loadstate ls save_state savestate ss pause unpause echo print log weapon slot variation sv_cheats mouse mousef mouse_rel glide glidef click mouse_down mouse_up scroll load_level wait_scene wait_control ff look_at optim_start optim_end bxt_tas_optim_init record_stop</Keywords>
+            <!-- Special frame keywords (UktasSyntax.SpecialWords) -->
+            <Keywords name="Keywords4">save seed target_yaw norefresh ff fff change look_at yaw pitch to over bake_start bake_end record_video record_video_stop</Keywords>
+            <!-- Modifiers (UktasSyntax.Modifiers): once: prefix and click buttons -->
+            <Keywords name="Keywords5">once left right middle lmb rmb mmb</Keywords>
+            <Keywords name="Keywords6"></Keywords>
+            <Keywords name="Keywords7"></Keywords>
+            <Keywords name="Keywords8"></Keywords>
+            <Keywords name="Delimiters"></Keywords>
+        </KeywordLists>
+        <Styles>
+            <!-- colorStyle="1" makes the background transparent so it blends with your theme -->
+            <WordsStyle name="DEFAULT" fgColor="D8DEE9" bgColor="000000" colorStyle="1" fontName="Consolas" fontStyle="0" nesting="0" />
+            <WordsStyle name="COMMENTS" fgColor="5C6370" bgColor="000000" colorStyle="1" fontName="Consolas" fontStyle="2" nesting="0" />
+            <WordsStyle name="LINE COMMENTS" fgColor="5C6370" bgColor="000000" colorStyle="1" fontName="Consolas" fontStyle="2" nesting="0" />
+            <!-- Numbers / frametimes / framebulk numeric columns -->
+            <WordsStyle name="NUMBERS" fgColor="D19A66" bgColor="000000" colorStyle="1" fontName="Consolas" fontStyle="0" nesting="0" />
+            <!-- Header keys (cyan, bold) -->
+            <WordsStyle name="KEYWORDS1" fgColor="56B6C2" bgColor="000000" colorStyle="1" fontName="Consolas" fontStyle="1" nesting="0" />
+            <!-- Header values / start modes (gold) -->
+            <WordsStyle name="KEYWORDS2" fgColor="E5C07B" bgColor="000000" colorStyle="1" fontName="Consolas" fontStyle="0" nesting="0" />
+            <!-- Commands (blue) -->
+            <WordsStyle name="KEYWORDS3" fgColor="61AFEF" bgColor="000000" colorStyle="1" fontName="Consolas" fontStyle="0" nesting="0" />
+            <!-- Special frames: save, seed, change, look_at, bake, record (red, bold) -->
+            <WordsStyle name="KEYWORDS4" fgColor="E06C75" bgColor="000000" colorStyle="1" fontName="Consolas" fontStyle="1" nesting="0" />
+            <!-- once: and click buttons (green) -->
+            <WordsStyle name="KEYWORDS5" fgColor="98C379" bgColor="000000" colorStyle="1" fontName="Consolas" fontStyle="0" nesting="0" />
+            <WordsStyle name="KEYWORDS6" fgColor="FFFFFF" bgColor="000000" colorStyle="0" fontName="Consolas" fontStyle="0" nesting="0" />
+            <WordsStyle name="KEYWORDS7" fgColor="FFFFFF" bgColor="000000" colorStyle="0" fontName="Consolas" fontStyle="0" nesting="0" />
+            <WordsStyle name="KEYWORDS8" fgColor="FFFFFF" bgColor="000000" colorStyle="0" fontName="Consolas" fontStyle="0" nesting="0" />
+            <!-- Pipes: slate gray grid guides -->
+            <WordsStyle name="OPERATORS" fgColor="5A6375" bgColor="000000" colorStyle="1" fontName="Consolas" fontStyle="1" nesting="0" />
+        </Styles>
+    </UserLang>
+</NotepadPlus>
