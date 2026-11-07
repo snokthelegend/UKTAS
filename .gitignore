@@ -64,3 +64,9 @@ double_dead.uktas
 
 # --- generated baked-state data (machine-specific, can be large) ---
 *.ukbake
+
+# --- local-only (not for the GitHub repo) ---
+CHANGELOG.md
+INSTALL.txt
+scratchpad_unitas.lua
+double_dead.uktas
