@@ -55,7 +55,11 @@ namespace UltrakillTAS
         WeaponLast = 1UL << 29,
         VariationNext = 1UL << 30,
         VariationPrev = 1UL << 31,
-        /// <summary>Pick variation 1-3 of the current weapon directly.</summary>
+        /// <summary>
+        /// Pick variation 1-3 of the current weapon directly. This is the game's variation
+        /// bind: pressing it re-equips the variation even when it is already equipped, which
+        /// resets the weapon's firing cooldown on that tick.
+        /// </summary>
         Variant1 = 1UL << 32,
         Variant2 = 1UL << 33,
         Variant3 = 1UL << 34,
@@ -63,14 +67,15 @@ namespace UltrakillTAS
         Stats = 1UL << 35,
         /// <summary>
         /// Script-only token 'G1' (shotgun swap), not a game action. While held, the engine
-        /// watches the game for a shotgun shot (Shotgun.gunReady) and after each shot
-        /// presses slot 2, releases it for one tick and presses slot 2 again.
+        /// watches the game for a shotgun shot (Shotgun.gunReady) and after each shot presses
+        /// the variation bind of the equipped shotgun variation, re-equipping that same
+        /// variation immediately and resetting its firing cooldown.
         /// </summary>
         ShotgunSwap1 = 1UL << 36,
         /// <summary>
         /// Script-only token 'G2' (same-tick shotgun swap), not a game action. The engine
-        /// presses fire, next variation and previous variation on one tick (drawing the
-        /// shotgun first on earlier ticks when another weapon is out).
+        /// presses fire, selects the other variation and selects the original variation on
+        /// one tick (drawing the shotgun first on earlier ticks when another weapon is out).
         /// </summary>
         ShotgunSwap2 = 1UL << 37
     }
@@ -363,7 +368,22 @@ namespace UltrakillTAS
                     case '1': result |= TasButtons.Fire1; break;
                     case '2': result |= TasButtons.Fire2; break;
                     case 'p': result |= TasButtons.Punch; break;
-                    case 'v': result |= TasButtons.Whiplash; break;
+                    case 'v':
+                        // 'v1' / 'v2' / 'v3' are the variation binds (blue, green, red). A
+                        // bare 'v' is still whiplash. The canonical whiplash slot is base
+                        // slot 5 (index 4), where 'v' stays whiplash even before a digit.
+                        if (i != 4 && i + 1 < field.Length && field[i + 1] >= '1' && field[i + 1] <= '3')
+                        {
+                            int variation = field[i + 1] - '0';
+                            result |= variation == 1 ? TasButtons.Variant1 :
+                                      (variation == 2 ? TasButtons.Variant2 : TasButtons.Variant3);
+                            i++;
+                        }
+                        else
+                        {
+                            result |= TasButtons.Whiplash;
+                        }
+                        break;
                     case 'w':
                     case 'W':
                         weaponTokenSeen = true;
@@ -416,7 +436,7 @@ namespace UltrakillTAS
                     }
                     default:
                         throw new TasParseException(lineNumber, sourceLine,
-                            "unknown action key '" + c + "' in field 3 (valid: j 1 2 p v w[N] x F K N P T < > y[1-3] S G[1-2], uppercase U D L R C B E for menus, - for neutral)");
+                            "unknown action key '" + c + "' in field 3 (valid: j 1 2 p v w[N] v1 v2 v3 x F K N P T < > y[1-3] S G[1-2], uppercase U D L R C B E for menus, - for neutral)");
                 }
             }
 
@@ -460,6 +480,8 @@ namespace UltrakillTAS
             if ((value & TasButtons.WeaponLast) != 0) sb.Append('T');
             if ((value & TasButtons.VariationPrev) != 0) sb.Append('<');
             if ((value & TasButtons.VariationNext) != 0) sb.Append('>');
+            // Canonical output keeps the historical y1/y2/y3 spelling. The parser accepts
+            // v1/v2/v3 as aliases of the same variation binds.
             if ((value & TasButtons.Variant1) != 0) sb.Append("y1");
             if ((value & TasButtons.Variant2) != 0) sb.Append("y2");
             if ((value & TasButtons.Variant3) != 0) sb.Append("y3");

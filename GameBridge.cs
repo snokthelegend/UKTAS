@@ -79,6 +79,10 @@ namespace UltrakillTAS
         public object OptionsManager { get { return ResolveSingleton(ref _optionsManager, _optionsManagerType ?? (_optionsManagerType = FindType("OptionsManager"))); } }
         public object FistControl { get { return ResolveSingleton(ref _fistControl, _fistControlType ?? (_fistControlType = FindType("FistControl"))); } }
 
+        Type _weaponChargesType;
+        object _weaponCharges;
+        public object WeaponCharges { get { return ResolveSingleton(ref _weaponCharges, _weaponChargesType ?? (_weaponChargesType = FindType("WeaponCharges"))); } }
+
         Type _statsManagerType;
         object _statsManager;
         public object StatsManager { get { return ResolveSingleton(ref _statsManager, _statsManagerType ?? (_statsManagerType = FindType("StatsManager"))); } }
@@ -965,6 +969,147 @@ namespace UltrakillTAS
                 return false;
             return SetMember(gun, new[] { "currentVariation", "variation", "currentVariant", "variant" },
                 Math.Max(0, oneBasedVariation - 1));
+        }
+
+        /// <summary>
+        /// Re-equip the equipped weapon variation through the game's own variation-bind path,
+        /// GunControl.SwitchWeapon(currentSlot, variation). Passing the slot and variation that
+        /// are already equipped still runs the game's deactivate/activate sequence, so the
+        /// weapon's firing cooldown resets on this tick. Used only when the InputSource action
+        /// state cannot be written (older builds or a renamed state wrapper).
+        /// </summary>
+        public bool TriggerVariationBind(int zeroBasedVariation)
+        {
+            object gun = GunControl;
+            if (gun == null)
+                return false;
+            // GunControl.currentSlotIndex is already 1-based (SwitchWeapon clamps it 1..slots).
+            int slot = ToInt(GetMember(gun, new[] { "currentSlotIndex", "currentSlot", "slot" }), -1);
+            if (slot < 1)
+                return false;
+            MethodInfo switchWeapon = FindMethod(gun.GetType(), "SwitchWeapon", 5);
+            if (switchWeapon == null)
+            {
+                LastError = "GunControl.SwitchWeapon(int, int?, bool, bool, bool) not found in this game version.";
+                return false;
+            }
+            try
+            {
+                switchWeapon.Invoke(gun, new object[] { slot, (int?)zeroBasedVariation, false, false, false });
+                return true;
+            }
+            catch (Exception ex)
+            {
+                LastError = "GunControl.SwitchWeapon failed: " + UnwrapMessage(ex);
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// The fist the player has equipped (0 = Feedbacker, 1 = Knuckleblaster, 3 = gold arm),
+        /// or -1 when FistControl is not available.
+        /// </summary>
+        public int CurrentFistVariant
+        {
+            get
+            {
+                object fists = FistControl;
+                return fists == null ? -1 : ToInt(GetMember(fists, new[] { "currentVarNum", "currentVar" }), -1);
+            }
+        }
+
+        /// <summary>
+        /// Fire the punch of the currently equipped arm. The punch is always the Punch component
+        /// FistControl.currentPunch points at, never the Feedbacker directly, so the Knuckleblaster
+        /// throws its heavy punch while it is equipped. The game's own gates are checked first
+        /// (arm ready, fist cooldown spent, punch stamina available, FistControl activated).
+        /// Punch.heldAction is pointed at the generic Punch action so the held-punch blast still
+        /// works. This is the fallback for builds where InputSource.Punch cannot be written.
+        /// </summary>
+        public bool TryPunchCurrentArm()
+        {
+            object fists = FistControl;
+            if (fists == null)
+                return false;
+            object punch = GetMember(fists, new[] { "currentPunch" });
+            if (punch == null)
+                return false;
+            if (!ToBool(GetMember(punch, new[] { "ready" }), true))
+                return false;
+            if (ToFloat(GetMember(fists, new[] { "fistCooldown" }), 0f) > 0f)
+                return false;
+            object charges = WeaponCharges;
+            if (charges != null && ToFloat(GetMember(charges, new[] { "punchStamina" }), 1f) < 1f)
+                return false;
+            if (!ToBool(GetMember(fists, new[] { "activated" }), true))
+                return false;
+            MethodInfo start = FindMethod(punch.GetType(), "PunchStart", 0);
+            if (start == null)
+            {
+                LastError = "Punch.PunchStart() not found in this game version.";
+                return false;
+            }
+
+            // Punch.BlastCheck reads heldAction to tell a held punch from a tap.
+            object source = InputSource;
+            object punchState = source != null ? GetMember(source, new[] { "Punch" }) : null;
+            object action = punchState != null ? GetMember(punchState, new[] { "Action" }) : null;
+            if (action != null)
+                SetMember(punch, new[] { "heldAction" }, action);
+
+            try
+            {
+                start.Invoke(punch, null);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                LastError = "Punch.PunchStart failed: " + UnwrapMessage(ex);
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Make FistControl's live pointers match the arm that is actually active. Called after
+        /// a savestate load: currentOrderNum/currentVarNum and the active arm object come from
+        /// the save, while currentPunch is a component reference that a light capture can skip.
+        /// Re-deriving it here keeps p routed to the equipped arm instead of a stale Feedbacker.
+        /// </summary>
+        public bool SyncFistControl()
+        {
+            object fists = FistControl;
+            if (fists == null)
+                return false;
+            System.Collections.IList spawned = GetMember(fists, new[] { "spawnedArms" }) as System.Collections.IList;
+            if (spawned == null || spawned.Count == 0)
+                return false;
+            int order = ToInt(GetMember(fists, new[] { "currentOrderNum" }), -1);
+            if (order < 0 || order >= spawned.Count)
+                return false;
+            GameObject arm = spawned[order] as GameObject;
+            if (arm == null)
+            {
+                Component component = spawned[order] as Component;
+                arm = component != null ? component.gameObject : null;
+            }
+            if (arm == null)
+                return false;
+            Type punchType = FindType("Punch");
+            Component punch = punchType != null ? arm.GetComponent(punchType) : null;
+            if (punch == null && punchType != null)
+                punch = arm.GetComponentInChildren(punchType);
+            if (punch == null)
+                return false;
+
+            bool applied = SetMember(fists, new[] { "currentPunch" }, punch);
+            System.Collections.IList nums = GetMember(fists, new[] { "spawnedArmNums" }) as System.Collections.IList;
+            if (nums != null && order < nums.Count)
+            {
+                int variant = ToInt(nums[order], -1);
+                if (variant >= 0)
+                    SetMember(fists, new[] { "currentVarNum" }, variant);
+            }
+            return applied;
         }
 
         /// <summary>

@@ -33,7 +33,7 @@ frames
 | `difficulty <name>` | `harmless`, `lenient`, `standard`, `violent` or `brutal`, or the game's number 0-4 (`GameDifficulty`: Harmless 0 .. Brutal 4). Set at Play, before the start scene loads and before the start state is captured, through the game's own `PrefsManager.SetInt("difficulty", n)` (what the difficulty menu does, so it stays set afterwards). Objects read it when they spawn: with `start_type none` or `load_state` the current scene keeps what it already spawned, and a warning is shown. Omitted: the game's current difficulty is kept. An unknown value gives a parse warning and keeps the current difficulty. Part of the norefresh checksum only when set. |
 | `wait_for_control <bool>` | Default true. Hold tick 1 until `NewMovement.activated` is true, then wait the configured settle frames. Ignored when there is no player (title screen, boot). |
 | `load_command <cmds>` | Semicolon-separated commands run once before frame 1. |
-| `fist <arm>` | `knuckleblaster` or `parry` (parry is the Feedbacker). Equips that fist before tick 0 (after the wait for control) through the game's `FistControl.ForceArm`, so the run does not depend on the fist the player had out. Omitted: the current fist is kept. The arm must be owned and enabled in the arm settings; otherwise a warning is shown and the current fist is kept. Part of the norefresh checksum. |
+| `fist <arm>` | `knuckleblaster` or `parry` (parry is the Feedbacker). Equips that fist before tick 0 (after the wait for control) through the game's `FistControl.ForceArm`, so the run does not depend on the fist the player had out. Omitted: the current fist is kept. The arm must be owned and enabled in the arm settings; otherwise a warning is shown and the current fist is kept. The equipped arm is captured in savestates, so rewinds keep it. Part of the norefresh checksum. |
 | `demo <file>`, `save <name>`, `author <text>`, `description <text>` | Optional metadata. |
 
 `start_type main_menu` loads the title screen so the script can click through menus. `start_type none` starts wherever the game currently is.
@@ -71,8 +71,8 @@ Base slots:
 | `j` | jump |
 | `1` | primary fire (left click) |
 | `2` | alt fire (right click) |
-| `p` | punch |
-| `v` | whiplash (hook) |
+| `p` | punch with the equipped arm (Feedbacker parry punch or Knuckleblaster explosive punch) |
+| `v` | whiplash (hook). A bare `v`; `v1` `v2` `v3` below are the variation binds. |
 | `w` | weapon select, always written with its slot digit, e.g. `-----w3` |
 
 Weapon slots: 1 revolver, 2 shotgun, 3 nailgun, 4 railcannon, 5 rocket launcher, 6 spawner arm.
@@ -88,18 +88,21 @@ Extension tokens, appended after the six slots in this order:
 | `P` | previous weapon (wheel down) |
 | `T` | last used weapon |
 | `<` / `>` | previous / next variation |
-| `y1` `y2` `y3` | select variation 1-3 of the current weapon |
+| `y1` `y2` `y3` | select variation 1-3 of the current weapon. `v1` `v2` `v3` are accepted aliases of the same binds. |
+| `v1` `v2` `v3` | variation bind 1-3 (blue / green / red). Re-equips that variation immediately even when it is already equipped, resetting its firing cooldown. Written as `y1` `y2` `y3` when the tool serializes a line. |
 | `S` | stats overlay (Tab) |
-| `G1` | shotgun swap after each shot (script-only). `G1` does not fire; the script fires with `1`. On every tick that holds `G1`, the shot is read from the game state, not from tick timing: the equipped shotgun's `gunReady` flag went from true to false since the previous tick, on the same shotgun, with `1` injected on the previous tick. The tick that sees the shot presses slot 2 (`w2`), then every following tick releases it for one tick and presses it again, until the variant the shot was fired from is equipped again: one press per owned shotgun variant, so slot 2 / release / slot 2 with two variants and one more press with all three. Then `G1` waits for the next shot. With the shotgun out, each slot 2 press switches to the next shotgun variant. Other ticks keep the script's input. A started sequence finishes even if `G1` ends. Does nothing with no shotgun out. |
+| `G1` | shotgun re-equip after each shot (script-only). `G1` does not fire; the script fires with `1`. On every tick that holds `G1`, the shot is read from the game state, not from tick timing: the equipped shotgun's `gunReady` flag went from true to false since the previous tick, on the same shotgun, with `1` injected on the previous tick. The tick that sees the shot presses the variation bind of the equipped variant (`y1` `y2` or `y3`), which re-equips that same variation and resets its cooldown immediately: a blue-to-blue swap costs no extra ticks. Then `G1` waits for the next shot. Other ticks keep the script's input. Does nothing with no shotgun out. |
 | `G2` | same-tick shotgun swap (script-only): fire, select other variant and select original variant all on one tick, so the cooldown resets with no extra ticks. The swap uses the variant select keys (`y1` `y2` `y3`), not next / previous variation (variant 2 when variant 1 is equipped, otherwise variant 1). With another weapon out, slot 2 is pressed first (then variation 1 if slot 2 brought out a later variant) on earlier ticks. A run of `G2` ticks starts one sequence, on its first tick. A bare `G` is an error. |
 
 With `G2`, if primary fire (`1`) is held on the tick before the fire step, Fire1 is released for one tick and the fire step runs on the next tick, so the game sees a new press. This adds one tick to the sequence.
 
 Menu tokens (uppercase): `U` `D` `L` `R` `C` `B` `E` are menu up, down, left, right, confirm, cancel, pause (Escape). They work in field 3, for example `-----C` presses Confirm for one tick.
 
-Examples: `------` nothing; `j-----` jump; `-12---` fire and alt-fire; `-----w2` switch to the shotgun; `------N` one wheel notch forward (hold for one tick only); `j12p--x` jump, both fires, punch and change fist; `-1----G1` fire, then slot 2 / release / slot 2 after the shot (one more press with all three shotgun variants); `------G2` same-tick shotgun swap.
+Examples: `------` nothing; `j-----` jump; `-12---` fire and alt-fire; `-----w2` switch to the shotgun; `------N` one wheel notch forward (hold for one tick only); `j12p--x` jump, both fires, punch and change fist; `-1----G1` fire, then re-equip the equipped shotgun variation after the shot; `------G2` same-tick shotgun swap; `------v2` press the green variation bind.
 
-Every token is injected as the exact key or mouse button the game has the action bound to (read from the game's own input asset), so rebinds work.
+`p` follows the equipped arm. With the Knuckleblaster out it throws the explosive punch; with the Feedbacker out it throws the parry punch. The header `fist knuckleblaster` / `fist feedbacker` sets the arm on tick zero, and the arm state is part of the savestate.
+
+Most tokens are injected as the exact key or mouse button the game has the action bound to (read from the game's own input asset), so rebinds work. Punch and the variation binds are written straight into the game's `InputSource` action state, so `p` always reaches the equipped arm and `v1` / `v2` / `v3` always re-equip the equipped variation without also firing a directly-bound arm action.
 
 ### Field 4: frametime
 

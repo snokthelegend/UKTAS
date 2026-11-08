@@ -867,7 +867,7 @@ description Act 1 any%: no damage</pre>
             <tr><td><code>difficulty</code></td><td><code>harmless</code> · <code>lenient</code> · <code>standard</code> · <code>violent</code> · <code>brutal</code>, or <code>0</code>–<code>4</code></td><td>Sets the difficulty at Play, before the start scene loads and before the start state is captured, through the game's <code>PrefsManager.SetInt("difficulty", n)</code> — what the difficulty menu does. It stays set afterwards.</td></tr>
             <tr><td><code>wait_for_control</code></td><td><code>true</code> / <code>false</code>, default <code>true</code></td><td>Holds tick 1 until <code>NewMovement.activated</code> is true (elevator drops, intros), then waits the configured settle frames. Ignored when there is no player (title screen, boot).</td></tr>
             <tr><td><code>load_command</code></td><td>semicolon-separated commands</td><td>Runs once, before frame 1.</td></tr>
-            <tr><td><code>fist</code></td><td><code>knuckleblaster</code> · <code>parry</code></td><td>Equips that fist before tick 0 (after the wait for control) through <code>FistControl.ForceArm</code>, so the run does not depend on the fist the player had out. <code>parry</code> is the Feedbacker.</td></tr>
+            <tr><td><code>fist</code></td><td><code>knuckleblaster</code> · <code>parry</code></td><td>Equips that fist before tick 0 (after the wait for control) through <code>FistControl.ForceArm</code>, so the run does not depend on the fist the player had out. <code>parry</code> is the Feedbacker. The equipped arm is captured in savestates, so rewinds keep it.</td></tr>
             <tr><td><code>weapons</code></td><td>keys, space or comma separated, or <code>none</code></td><td>The gear the player owns for the run. Applied at Play in memory only — no save file is touched.</td></tr>
             <tr><td><code>loadout</code></td><td><code>&lt;field&gt;=&lt;b&gt;&lt;r&gt;&lt;g&gt;</code> tokens</td><td>Forced-loadout variants, written into the game's live <code>ForcedLoadout</code> at Play.</td></tr>
             <tr><td><code>demo</code> · <code>save</code> · <code>author</code> · <code>description</code></td><td>free text / file name</td><td>Optional metadata.</td></tr>
@@ -987,8 +987,8 @@ weapons rev0 rev1 sho0 nai0 rai0 rock0 arm1</pre>
             <tr><td>1</td><td><code>j</code></td><td>Jump</td><td>Space by default.</td></tr>
             <tr><td>2</td><td><code>1</code></td><td>Primary fire</td><td>Left mouse button.</td></tr>
             <tr><td>3</td><td><code>2</code></td><td>Alt fire</td><td>Right mouse button.</td></tr>
-            <tr><td>4</td><td><code>p</code></td><td>Punch</td><td>Fist attack.</td></tr>
-            <tr><td>5</td><td><code>v</code></td><td>Whiplash</td><td>The hook.</td></tr>
+            <tr><td>4</td><td><code>p</code></td><td>Punch</td><td>Fist attack with the equipped arm: Feedbacker parry punch or Knuckleblaster explosive punch.</td></tr>
+            <tr><td>5</td><td><code>v</code></td><td>Whiplash</td><td>The hook. Use <code>v1</code> / <code>v2</code> / <code>v3</code> for the variation binds.</td></tr>
             <tr><td>6</td><td><code>w</code> + digit</td><td>Weapon select</td><td>Slots: 1 revolver · 2 shotgun · 3 nailgun · 4 railcannon · 5 rocket launcher · 6 spawner arm. Always written with the digit, e.g. <code>-----w3</code>.</td></tr>
           </tbody>
         </table>
@@ -1008,7 +1008,8 @@ weapons rev0 rev1 sho0 nai0 rai0 rock0 arm1</pre>
             <tr><td><code>T</code></td><td>Last used weapon</td><td></td></tr>
             <tr><td><code>&lt;</code></td><td>Previous variation</td><td></td></tr>
             <tr><td><code>&gt;</code></td><td>Next variation</td><td></td></tr>
-            <tr><td><code>y1 y2 y3</code></td><td>Select variation 1–3</td><td>Of the current weapon.</td></tr>
+            <tr><td><code>y1 y2 y3</code></td><td>Select variation 1–3</td><td>Of the current weapon. <code>v1</code> / <code>v2</code> / <code>v3</code> are accepted aliases; the tool writes the <code>y</code> form.</td></tr>
+            <tr><td><code>v1 v2 v3</code></td><td>Variation bind 1–3</td><td>Blue / green / red. Re-equips that variation immediately, even if it is already equipped, which resets its firing cooldown. The same bind <code>G1</code> uses.</td></tr>
             <tr><td><code>S</code></td><td>Stats overlay</td><td>Tab.</td></tr>
             <tr><td><code>G1</code></td><td>Shotgun swap after each shot</td><td>Script-only. Does not fire — the script fires with <code>1</code> as usual.</td></tr>
             <tr><td><code>G2</code></td><td>Same-tick shotgun swap</td><td>Script-only. Fires, selects the other variant and selects the original variant on one tick.</td></tr>
@@ -1020,8 +1021,8 @@ weapons rev0 rev1 sho0 nai0 rai0 rock0 arm1</pre>
       <h3 id="g1">G1 — shotgun swap after each shot</h3>
       <div class="card tinted">
         <p>On every tick that holds <code>G1</code> the engine reads the shot from the game state, not from tick timing: the equipped shotgun's <code>gunReady</code> went from true to false since the previous tick, on the same shotgun, with primary fire (<code>1</code>) injected on the previous tick.</p>
-        <p>The tick that sees the shot presses slot 2 (<code>w2</code>), then every following tick releases slot 2 for one tick and presses it again, until the variant the shot was fired from is equipped again: one press per owned shotgun variant — so slot 2 / release / slot 2 with two variants, and one more press with all three. Then <code>G1</code> waits for the next shot.</p>
-        <p>With the shotgun out, each slot 2 press switches to the next shotgun variant. Ticks without a swap step keep the script's input. A started sequence finishes even if <code>G1</code> ends.</p>
+        <p>The tick that sees the shot presses the variation bind of the equipped variant (<code>y1</code> / <code>y2</code> / <code>y3</code>, also written <code>v1</code> / <code>v2</code> / <code>v3</code>). The game treats the bind as a fresh equip of that same variation, so the weapon's cooldown resets on the spot: a blue-to-blue swap costs no extra ticks and no slot 2 presses. Then <code>G1</code> waits for the next shot.</p>
+        <p>Ticks without a shot keep the script's input.</p>
         <p class="small muted">Hold <code>G1</code> over the ticks where shots can happen. It does nothing with no shotgun out.</p>
       </div>
 
@@ -1044,12 +1045,13 @@ weapons rev0 rev1 sho0 nai0 rai0 rock0 arm1</pre>
             <tr><td><code>-----w2</code></td><td>Switch to the shotgun</td></tr>
             <tr><td><code>------N</code></td><td>One wheel notch forward (hold for one tick only)</td></tr>
             <tr><td><code>j12p--x</code></td><td>Jump, both fires, punch and change fist</td></tr>
-            <tr><td><code>-1----G1</code></td><td>Fire; after the shot: slot 2, release, slot 2 (once more with all three variants)</td></tr>
+            <tr><td><code>-1----G1</code></td><td>Fire; after the shot, re-equip the equipped shotgun variation (cooldown reset)</td></tr>
+            <tr><td><code>------v2</code></td><td>Press the green variation bind</td></tr>
             <tr><td><code>------G2</code></td><td>Same-tick shotgun swap: all three on one tick</td></tr>
           </tbody>
         </table>
       </div>
-      <p class="small">Every token is injected as the exact key or mouse button the game has the action bound to (read from the game's own input asset), so rebinds work. Each action also lights up on the HUD's “now” rows while it is held.</p>
+      <p class="small">Most tokens are injected as the exact key or mouse button the game has the action bound to (read from the game's own input asset), so rebinds work. Punch and the variation binds are written straight into the game's <code>InputSource</code> action state: <code>p</code> always reaches the equipped arm, and <code>v1</code> / <code>v2</code> / <code>v3</code> always re-equip the equipped variation without also firing a directly-bound arm action. Each action also lights up on the HUD's “now” rows while it is held, including variation binds pressed by a macro such as <code>G1</code>.</p>
 
       <h3 id="field4">Field 4 — frametime</h3>
       <p>Seconds for each tick of this bulk, or <code>-</code> to inherit <code>host_frametime</code>. The usual values are <code>0.001</code>, <code>0.008</code>, <code>0.01666667</code> and <code>0.25</code>.</p>
@@ -2485,8 +2487,8 @@ const ACTS={
  j:{n:"Jump",s:"base slot 1",d:"Jump, injected as the game's jump key (Space by default)."},
  "1":{n:"Primary fire",s:"base slot 2",d:"Primary fire — left mouse button by default."},
  "2":{n:"Alt fire",s:"base slot 3",d:"Alt fire — right mouse button by default."},
- p:{n:"Punch",s:"base slot 4",d:"Fist attack."},
- v:{n:"Whiplash",s:"base slot 5",d:"The hook."},
+ p:{n:"Punch",s:"base slot 4",d:"Fist attack with the equipped arm: Feedbacker parry punch or Knuckleblaster explosive punch.",v:["follows FistControl.currentPunch, so it never forces the Feedbacker","the header fist sets the arm on tick zero; the arm survives savestate rewinds"]},
+ v:{n:"Whiplash",s:"base slot 5",d:"The hook. v1/v2/v3 are the variation binds."},
  w:{n:"Weapon select",s:"base slot 6 — always written with its digit",d:"Selects a weapon slot. The digit is part of the token, so the slot reads as seven characters.",v:["w1 revolver","w2 shotgun","w3 nailgun","w4 railcannon","w5 rocket launcher","w6 spawner arm"]},
  x:{n:"Change fist",s:"extension 1",d:"Cycles the arms.",f:1},
  F:{n:"Feedbacker",s:"extension 2",d:"Selects the Feedbacker directly.",f:1},
@@ -2496,11 +2498,11 @@ const ACTS={
  T:{n:"Last used weapon",s:"extension 6",d:"Swaps back to the previous weapon.",f:1},
  "<":{n:"Previous variation",s:"extension 7",d:"Previous variant of the current weapon.",f:1},
  ">":{n:"Next variation",s:"extension 8",d:"Next variant of the current weapon.",f:1},
- y1:{n:"Variation 1",s:"extension 9",d:"Selects variation 1 of the current weapon.",f:1,v:["uses the variant select keys, not next/previous"]},
- y2:{n:"Variation 2",s:"extension 10",d:"Selects variation 2 of the current weapon.",f:1},
- y3:{n:"Variation 3",s:"extension 11",d:"Selects variation 3 of the current weapon.",f:1},
+ y1:{n:"Variation 1",s:"extension 9",d:"Selects variation 1 of the current weapon; v1 is accepted as the same bind.",f:1,v:["uses the variant select keys, not next/previous","re-equips variation 1 even when it is already equipped, resetting its cooldown"]},
+ y2:{n:"Variation 2",s:"extension 10",d:"Selects variation 2 of the current weapon; v2 is accepted as the same bind.",f:1},
+ y3:{n:"Variation 3",s:"extension 11",d:"Selects variation 3 of the current weapon; v3 is accepted as the same bind.",f:1},
  S:{n:"Stats overlay",s:"extension 12",d:"Toggles the stats overlay (Tab).",f:1},
- G1:{n:"Shotgun swap after each shot",s:"extension 13",d:"Script-only. It never fires: hold it over ticks where shots can land and the engine watches the shotgun's gunReady flag from the game state.",f:20,v:["the tick that sees the shot presses w2, then releases and presses it once per owned variant","a started sequence finishes even if G1 ends","do nothing with no shotgun out"]},
+ G1:{n:"Shotgun swap after each shot",s:"extension 13",d:"Script-only. It never fires: hold it over ticks where shots can land and the engine watches the shotgun's gunReady flag from the game state.",f:20,v:["the tick that sees the shot presses the equipped variation's bind (y1/y2/y3, aliases v1/v2/v3)","the bind re-equips the same variation immediately, resetting its cooldown","do nothing with no shotgun out"]},
  G2:{n:"Same-tick shotgun swap",s:"extension 14",d:"Script-only. Fires, selects the other variant and re-selects the original on the same tick, so the cooldown resets with no extra ticks.",f:1,v:["uses y1/y2/y3, not next/previous variation","the other variant is 2 when 1 is equipped, otherwise 1","with 1 held on the tick before, the fire step moves one tick later"]},
  U:{n:"Menu up",s:"menu token",d:"Menu navigation, bound to the config's Menu up key.",f:1},
  D:{n:"Menu down",s:"menu token",d:"Menu navigation, bound to Menu down.",f:1},

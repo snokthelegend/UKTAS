@@ -3021,23 +3021,12 @@ namespace UltrakillTAS
         // True once the fire step has spent its one release tick (Fire1 was held into it).
         bool _swapFireReleased;
 
-        // Shotgun swap token 'G1': waits for a shot read from the game, then presses slot 2
-        // once per owned shotgun variant (one tick pressed, one tick released), so the variant
-        // the shot came from is equipped again when the sequence ends. Two variants keep the
-        // old slot 2 / release / slot 2; three variants add one more press instead of stopping
-        // on the third one.
-        const int ShotSwapIdle = 0;
-        const int ShotSwapPress = 1;     // slot 2 down: shotgun out, so the game cycles the variant
-        const int ShotSwapRelease = 2;   // slot 2 up for one tick, so the next press is a new press
-        const int ShotSwapMaxPresses = 3; // one press per shotgun variant
-        int _shotSwapStep = ShotSwapIdle;
-        // Tick the next 'G1' step is due on. A rewind or seek leaves it stale, which drops the sequence.
-        int _shotSwapTick = -1;
-        // 0-based variant the shot was fired from, -1 when the game does not report it; the
-        // presses run until that variant is equipped again.
-        int _shotSwapOriginal = -1;
-        // Slot 2 presses done by the running sequence.
-        int _shotSwapPresses;
+        // Shotgun swap token 'G1': waits for a shot read from the game, then presses the
+        // variation bind of the shotgun variation that is equipped. The game's variation bind
+        // re-equips that variation even when it is already equipped, which resets the firing
+        // cooldown on the same tick. No slot 2 presses and no release tick are needed.
+        // False once a warning about an unreadable variation index has been shown.
+        bool _shotSwapVariantWarned;
         // Shot signal of the previous tick: the equipped Shotgun component, its gunReady flag and
         // whether Fire1 was injected. Only compared when read on the tick right before (_shotPrevTick).
         object _shotPrevShotgun;
@@ -3049,8 +3038,8 @@ namespace UltrakillTAS
         /// Expands the script-only ShotgunSwap1 / ShotgunSwap2 flags into real inputs for
         /// this tick.
         /// 'G1' (see ApplyShotSwap): every tick that holds it watches the game for a shotgun
-        /// shot; after a shot it presses slot 2 once per owned shotgun variant, releasing it for
-        /// one tick between presses, so the same variant is equipped again for the next shot.
+        /// shot; the tick that sees the shot presses the equipped variation's bind, which
+        /// re-equips that same variation immediately and resets its cooldown for the next shot.
         /// 'G2': a new sequence starts on the first tick of a run of 'G2' ticks. With a
         /// shotgun out: fire, select-other and select-original all on one tick. The select
         /// keys (Variant1/2/3) are used because next/previous variation open the weapon wheel.
@@ -3112,19 +3101,19 @@ namespace UltrakillTAS
         }
 
         /// <summary>
-        /// 'G1': shot-triggered shotgun swap. The shot is read from the game every tick, not
+        /// 'G1': shot-triggered shotgun re-equip. The shot is read from the game every tick, not
         /// guessed from tick timing: Shotgun.gunReady (on the equipped weapon) going from
         /// true on the previous tick to false on this tick, on the same Shotgun component,
         /// with Fire1 injected on the previous tick (the tick the game fired on; alt-fire
         /// pumps and core ejects also clear gunReady, so ticks without Fire1 do not count).
         /// Inputs are injected before the game's Update, so the state read here is the
-        /// result of the previous tick. The tick that sees the
-        /// shot presses Slot2, then every following tick releases it for one tick and presses it
-        /// again, until the variant the shot was fired from is equipped again: one press per
-        /// owned shotgun variant, so two presses with two variants and three with all three.
-        /// Then 'G1' waits for the next shot. A shot is only acted on while the tick holds
-        /// 'G1'; a started sequence finishes. State is keyed on tick numbers only, so a
-        /// replay reads the same signal on the same ticks.
+        /// result of the previous tick. On the tick that sees the shot, 'G1' presses the
+        /// variation bind of the equipped variation (blue/green/red). GunControl treats the
+        /// bind as a fresh equip of that slot and variation, so the weapon is re-enabled with
+        /// its cooldown reset immediately -- a blue-to-blue swap costs one tick, not a slot 2
+        /// cycle. Then 'G1' waits for the next shot. A shot is only acted on while the tick
+        /// holds 'G1'. State is keyed on tick numbers only, so a replay reads the same signal
+        /// on the same ticks.
         /// </summary>
         TasButtons ApplyShotSwap(TasButtons buttons, bool wanted)
         {
@@ -3134,29 +3123,20 @@ namespace UltrakillTAS
             bool shot = haveShotgun && _shotPrevTick == CurrentTick - 1 && _shotPrevFire1 &&
                         _shotPrevReady && !ready && ReferenceEquals(shotgun, _shotPrevShotgun);
 
-            if (_shotSwapStep != ShotSwapIdle && _shotSwapTick != CurrentTick)
-                _shotSwapStep = ShotSwapIdle;
-            if (_shotSwapStep == ShotSwapIdle && wanted && shot)
+            if (wanted && shot)
             {
-                _shotSwapStep = ShotSwapPress;
-                _shotSwapTick = CurrentTick;
-                _shotSwapOriginal = _bridge.GunVariation;
-                _shotSwapPresses = 0;
+                TasButtons bind = VariationBindKey(_bridge.GunVariation);
+                if (bind != TasButtons.None)
+                {
+                    buttons |= bind;
+                    _shotSwapVariantWarned = false;
+                }
+                else if (!_shotSwapVariantWarned)
+                {
+                    _shotSwapVariantWarned = true;
+                    _plugin.Toast("G1: the equipped shotgun variation could not be read; no re-equip on this shot.", true);
+                }
             }
-
-            switch (_shotSwapStep)
-            {
-                case ShotSwapPress:
-                    buttons |= TasButtons.Slot2;
-                    _shotSwapPresses++;
-                    _shotSwapStep = ShotSwapRelease;
-                    break;
-                case ShotSwapRelease:
-                    buttons &= ~TasButtons.Slot2;
-                    _shotSwapStep = ShotSwapCycleDone() ? ShotSwapIdle : ShotSwapPress;
-                    break;
-            }
-            _shotSwapTick = CurrentTick + 1;
 
             _shotPrevShotgun = haveShotgun ? shotgun : null;
             _shotPrevReady = haveShotgun && ready;
@@ -3165,23 +3145,16 @@ namespace UltrakillTAS
             return buttons;
         }
 
-        /// <summary>
-        /// True when the 'G1' presses have cycled back to the variant the shot came from, so the
-        /// next shot fires that same variant. The variant index is read on the release tick, the
-        /// tick after the press, so the press count follows however many shotgun variants the
-        /// player owns without the engine needing the variant list. While the index cannot be
-        /// read the old two-press sequence is kept, and the count is capped at one press per
-        /// shotgun variant so a variant list the index never returns from cannot press slot 2
-        /// forever.
-        /// </summary>
-        bool ShotSwapCycleDone()
+        /// <summary>Variation bind for a 0-based variation index: 0 blue, 1 green, 2 red.</summary>
+        static TasButtons VariationBindKey(int index)
         {
-            if (_shotSwapPresses >= ShotSwapMaxPresses)
-                return true;
-            int variation = _bridge.GunVariation;
-            if (_shotSwapOriginal < 0 || variation < 0)
-                return _shotSwapPresses >= 2;
-            return variation == _shotSwapOriginal;
+            switch (index)
+            {
+                case 0: return TasButtons.Variant1;
+                case 1: return TasButtons.Variant2;
+                case 2: return TasButtons.Variant3;
+                default: return TasButtons.None;
+            }
         }
 
         /// <summary>Select key for a 0-based variant index: 0 = Variant1, 1 = Variant2, 2 and up = Variant3.</summary>

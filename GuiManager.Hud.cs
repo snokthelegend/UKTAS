@@ -952,11 +952,13 @@ namespace UltrakillTAS
             if (matrixRows > 0)
             {
                 // "now": everything held on the devices this frame (your keys, or the keys the
-                // script injects) plus the last scripted tick while it plays. "F6": what the
-                // next frame advance will commit while the clock is frozen.
+                // script injects) plus the last scripted tick while it plays. CurrentButtons is
+                // the exact mask injected on this tick, so macro presses such as G1's variation
+                // re-equip light up too. "F6": what the next frame advance will commit while
+                // the clock is frozen.
                 TasButtons now = _input.LiveButtons;
                 if (_engine.Mode == EngineMode.Playing)
-                    now |= _engine.LastButtons;
+                    now |= _engine.LastButtons | _input.CurrentButtons;
                 Color green = new Color(0.35f, 1f, 0.55f);
                 DrawMatrixRow(0f, cursor, "now", RowMove, now, green);
                 cursor += 20f;

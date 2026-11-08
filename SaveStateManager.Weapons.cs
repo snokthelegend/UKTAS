@@ -21,7 +21,8 @@ namespace UltrakillTAS
         {
             "slots", "slotDict", "retainedVariations", "currentSlotIndex", "currentSlot",
             "currentVariationIndex", "currentVariation", "currentVariant", "currentWeapon",
-            "spawnedArmNums", "currentArm", "arm", "holding", "hasArm", "currentFist"
+            "spawnedArmNums", "currentOrderNum", "currentVarNum", "currentPunch",
+            "currentArm", "arm", "holding", "hasArm", "currentFist"
         };
 
         sealed class WeaponPartState
@@ -69,6 +70,11 @@ namespace UltrakillTAS
                 try
                 {
                     ApplyFields(component, part.Named);
+                    // The active arm's Punch component is the one p must fire. A light
+                    // capture can skip the currentPunch reference, so derive it from the
+                    // restored currentOrderNum and the arm objects before the next tick.
+                    if (part.TypeName == "FistControl")
+                        _bridge.SyncFistControl();
                     restored++;
                 }
                 catch (Exception ex)

@@ -478,6 +478,7 @@ namespace UltrakillTAS
                 // Held across ticks (or across a savestate load, see RestoreHeldState): no
                 // fresh press edge. Only a button that is new this tick is stamped.
                 ApplyActionStates(buttons, buttons & previous & ~repeatPress);
+                ApplyInjectionFallbacks(buttons, previous);
             }
         }
 
@@ -503,6 +504,9 @@ namespace UltrakillTAS
             ApplyDeviceState(buttons);
             // Same suppression as the next ApplyFrame: held state must not stamp a press edge.
             ApplyActionStates(buttons, buttons);
+            // The performed-frame stamp is not part of the savestate. Drop it for a punch that
+            // was held when the state was captured so it cannot fire again on the first frame.
+            ClearPerformedEdge(TasButtons.Punch);
         }
 
         /// <summary>Release everything while paused or while the GUI owns the mouse.</summary>
@@ -593,6 +597,11 @@ namespace UltrakillTAS
         // ULTRAKILL InputSource action states
         // ------------------------------------------------------------------
 
+        // Flags whose InputSource state could not be written this tick. The fallbacks below call
+        // the game's own method for these instead of injecting a device key that could drive a
+        // second, differently-routed action.
+        TasButtons _unresolvedActionStates;
+
         void ApplyActionStates(TasButtons buttons)
         {
             ApplyActionStates(buttons, TasButtons.None);
@@ -600,9 +609,14 @@ namespace UltrakillTAS
 
         void ApplyActionStates(TasButtons buttons, TasButtons suppressEdges)
         {
+            _unresolvedActionStates = TasButtons.None;
             object source = _bridge.InputSource;
             if (source == null)
+            {
+                _unresolvedActionStates = TasButtons.Punch | TasButtons.Variant1 |
+                                          TasButtons.Variant2 | TasButtons.Variant3;
                 return;
+            }
             if (!ReferenceEquals(source, _cachedSource))
             {
                 _cachedSource = source;
@@ -621,11 +635,17 @@ namespace UltrakillTAS
                 }
 
                 bool pressed = Has(buttons, flag);
-                WriteActionState(accessor, source, names, pressed, Has(suppressEdges, flag));
+                if (!WriteActionState(accessor, source, names, pressed, Has(suppressEdges, flag)))
+                    _unresolvedActionStates |= flag;
             }
         }
 
-        void WriteActionState(ActionAccessor accessor, object source, string[] candidateNames, bool pressed, bool suppressEdge)
+        /// <summary>
+        /// Write one InputSource action state. Returns false when the wrapper could not be
+        /// resolved or the write did not reach the source (for example a property returning a
+        /// struct, where setting a member only mutates a boxed copy).
+        /// </summary>
+        bool WriteActionState(ActionAccessor accessor, object source, string[] candidateNames, bool pressed, bool suppressEdge)
         {
             try
             {
@@ -656,28 +676,88 @@ namespace UltrakillTAS
                 }
 
                 if (!accessor.Resolved)
-                    return;
+                    return false;
 
                 object actionState = _bridge.GetMemberValue(source, accessor.SourceMember);
                 if (actionState == null)
-                    return;
+                    return false;
+
+                bool stampEdge = pressed && !suppressEdge && accessor.PerformedMember != null;
+                int frame = stampEdge ? Time.frameCount + _plugin.PerformedFrameOffset.Value : 0;
 
                 _bridge.SetMemberValue(actionState, accessor.PressedMember, pressed);
-                if (pressed && !suppressEdge && accessor.PerformedMember != null)
-                {
-                    int frame = Time.frameCount + _plugin.PerformedFrameOffset.Value;
+                if (stampEdge)
                     _bridge.SetMemberValue(actionState, accessor.PerformedMember, frame);
-                }
 
                 // If InputSource exposes the action as a struct, write the mutated
                 // copy back to the source object.
                 FieldInfo sourceField = accessor.SourceMember as FieldInfo;
                 if (sourceField != null && actionState.GetType().IsValueType)
                     sourceField.SetValue(source, actionState);
+
+                // Verify the write reached the source: a property that returns a struct only
+                // mutates a copy, and the fallback paths need to know that.
+                object check = _bridge.GetMemberValue(source, accessor.SourceMember);
+                if (check == null)
+                    return false;
+                if (GameBridge.ToBool(_bridge.GetMemberValue(check, accessor.PressedMember), false) != pressed)
+                    return false;
+                if (stampEdge && GameBridge.ToInt(_bridge.GetMemberValue(check, accessor.PerformedMember),
+                        int.MinValue) != frame)
+                    return false;
+                return true;
             }
             catch (Exception ex)
             {
                 _plugin.LogWarning("InputSource write failed for " + accessor.Name + ": " + ex.Message);
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Fallbacks for InputSource action states this build does not expose writably.
+        /// Variation binds re-equip through GunControl.SwitchWeapon; punch fires the Punch
+        /// component FistControl has equipped. Neither touches the bound key, so the game's
+        /// direct Punch (Feedbacker) / (Knuckleblaster) actions stay out of the path.
+        /// </summary>
+        void ApplyInjectionFallbacks(TasButtons buttons, TasButtons previous)
+        {
+            if ((_unresolvedActionStates & TasButtons.Variant1) != 0 && Has(buttons, TasButtons.Variant1))
+                _bridge.TriggerVariationBind(0);
+            if ((_unresolvedActionStates & TasButtons.Variant2) != 0 && Has(buttons, TasButtons.Variant2))
+                _bridge.TriggerVariationBind(1);
+            if ((_unresolvedActionStates & TasButtons.Variant3) != 0 && Has(buttons, TasButtons.Variant3))
+                _bridge.TriggerVariationBind(2);
+
+            // Punch is a one-shot: only the press edge fires, and a held p does not repeat.
+            if ((_unresolvedActionStates & TasButtons.Punch) != 0 && Has(buttons, TasButtons.Punch) &&
+                !Has(previous, TasButtons.Punch))
+                _bridge.TryPunchCurrentArm();
+        }
+
+        /// <summary>
+        /// Clear the performed-frame stamp of a held one-shot action after a savestate load.
+        /// The stamp is not part of the savestate, so a punch that was held when the state was
+        /// captured could otherwise fire again on the first frame after the load.
+        /// </summary>
+        void ClearPerformedEdge(TasButtons flags)
+        {
+            object source = _bridge.InputSource;
+            if (source == null)
+                return;
+            for (int i = 0; i < AllActionButtons.Length; i++)
+            {
+                TasButtons flag = AllActionButtons[i];
+                if (!Has(flags, flag))
+                    continue;
+                ActionAccessor accessor;
+                if (!_accessors.TryGetValue(ActionNames[flag][0], out accessor) ||
+                    !accessor.Resolved || accessor.PerformedMember == null)
+                    continue;
+                object state = _bridge.GetMemberValue(source, accessor.SourceMember);
+                if (state == null)
+                    continue;
+                _bridge.SetMemberValue(state, accessor.PerformedMember, Time.frameCount - 1);
             }
         }
 
@@ -873,6 +953,13 @@ namespace UltrakillTAS
             {
                 TasButtons flag = AllActionButtons[i];
                 if (!Has(buttons, flag))
+                    continue;
+                // Punch and the variation binds are written straight into InputSource through
+                // ApplyActionStates. Pressing their bound keys as well would also drive the
+                // game's direct punch actions, which select an arm themselves and can force
+                // the Feedbacker over the equipped Knuckleblaster.
+                if (flag == TasButtons.Punch || flag == TasButtons.Variant1 ||
+                    flag == TasButtons.Variant2 || flag == TasButtons.Variant3)
                     continue;
                 List<BoundControl> controls = BoundFor(flag);
                 if (controls == null)
