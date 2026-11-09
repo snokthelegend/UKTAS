@@ -32,7 +32,7 @@ namespace UltrakillTAS
     {
         public const string Guid = "com.tas.ultrakill";
         public const string PluginName = "ULTRAKILL TAS Tool";
-        public const string PluginVersion = "1.2.0";
+        public const string PluginVersion = "1.2.2";
 
         public static Plugin Instance { get; private set; }
 

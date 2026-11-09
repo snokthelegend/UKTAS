@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>UKTAS Guide</title>
-<meta name="description" content="Beginner guide and full reference for UKTAS 1.2.0, the ULTRAKILL TAS tool: what TAS is, your first 10 minutes, recording, exact savestates, the HUD, Performance Render Mode, troubleshooting, the sweep/ML optimizer, video recording, and the complete .uktas script format.">
+<meta name="description" content="Beginner guide and full reference for UKTAS 1.2.2, the ULTRAKILL TAS tool: what TAS is, your first 10 minutes, recording, exact savestates, the HUD, Performance Render Mode, troubleshooting, the sweep/ML optimizer, video recording, and the complete .uktas script format.">
 <style>
 :root{--bg:#0a0b0f;--bg2:#0c0e14;--panel:#141821;--panel2:#1a1f2b;--line:#252b38;--line2:#333b4c;--fg:#e9e7e3;--muted:#98a1b3;--accent:#ff5c5c;--accent2:#ffb547;--ok:#5ee6c4;--warn:#ffb547;--err:#ff8080;--c1:#5ee6c4;--c2:#7db7ff;--c3:#ff9f5e;--c4:#d9a7ff;--c5:#ffe066;--c6:#ff7aa2;--c7:#9be37a;--c8:#c4c8d0;--r:12px;--mono:ui-monospace,SFMono-Regular,"Cascadia Mono","IBM Plex Mono",Consolas,monospace;--sans:system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;color-scheme:dark}
 /* Dark is the base and the default. Light applies when the user picks Light, or picks System on a light system. */
@@ -373,7 +373,7 @@ main p code,main li code,main dd code,.note code,.big-warn code{overflow-wrap:an
       <a class="navlink" href="#tokens">Token index</a>
     </div>
     <div class="meta">
-      <b>UKTAS 1.2.0</b> (plugin version)<br>
+      <b>UKTAS 1.2.2</b> (plugin version)<br>
       <a href="https://github.com/snokthelegend/UKTAS/blob/main/CHANGELOG.md">Changelog</a><br>
       Script header: <code>version 1</code><br>
       8 pipe-separated fields, BunnyMod XT layout
@@ -383,7 +383,7 @@ main p code,main li code,main dd code,.note code,.big-warn code{overflow-wrap:an
   <main id="main">
     <!-- ================================================================ BEGINNER GUIDE -->
     <section id="top">
-      <div class="kicker">ULTRAKILL TAS tool · UKTAS 1.2.0</div>
+      <div class="kicker">ULTRAKILL TAS tool · UKTAS 1.2.2</div>
       <h1>UKTAS guide.<br>No TAS experience needed.</h1>
       <p class="lede">This page starts from zero. Read the "Start here" part from top to bottom once. The "Format reference" part further down is for looking things up later.</p>
       <p class="small"><b>Developed by snok</b></p>
@@ -500,7 +500,7 @@ main p code,main li code,main dd code,.note code,.big-warn code{overflow-wrap:an
         <li><b>Install.</b> Install BepInEx 5 (x64) into ULTRAKILL once. Close ULTRAKILL. Open the zip and drag the <code>ultrakill</code> folder onto your ULTRAKILL game folder (the one with <code>ULTRAKILL.exe</code>). Click Replace/merge if asked. The full install notes are in <code>INSTALL.txt</code> next to this file.
           <span class="see">the folders merge, and <code>BepInEx\plugins\UltrakillTAS\UltrakillTAS.dll</code> exists in your game folder.</span></li>
         <li><b>Start ULTRAKILL.</b> The first start after installing is slower than usual. That is normal.
-          <span class="see">a message in the top-right corner: "ULTRAKILL TAS Tool 1.2.0 loaded. Insert opens the TAS window."</span></li>
+          <span class="see">a message in the top-right corner: "ULTRAKILL TAS Tool 1.2.2 loaded. Insert opens the TAS window."</span></li>
         <li><b>Enter any level</b> from the game's own menu, for example 1-1.
           <span class="see">you are playing normally.</span></li>
         <li><b>Press <kbd class="k">Insert</kbd>.</b>
@@ -792,7 +792,7 @@ look_at off</pre>
         <p class="small muted">The framebulk layout, the speedometer style and commands such as <code>bxt_timer_start</code> and <code>bxt_rec</code> follow bunnymodXT conventions.</p>
       </div>
       <h3 id="version">About the version numbers</h3>
-      <p>The tool is <b>UKTAS 1.2.0</b>; that is the plugin version shown in the "loaded" message. The script file format is <b>version 1</b>; that is the <code>version 1</code> line at the top of every script. They are separate numbers.</p>
+      <p>The tool is <b>UKTAS 1.2.2</b>; that is the plugin version shown in the "loaded" message. The script file format is <b>version 1</b>; that is the <code>version 1</code> line at the top of every script. They are separate numbers.</p>
       <p>Release notes and the full list of changes are in <a href="https://github.com/snokthelegend/UKTAS/blob/main/CHANGELOG.md">CHANGELOG.md</a>.</p>
     </section>
 
@@ -2515,7 +2515,7 @@ look_at off</pre></div>
     </div>
 
     <footer>
-      <p><b>UKTAS 1.2.0</b> · script format <code>version 1</code> · developed by snok. Shipped as <code>UKTAS_DOCS.html</code> next to <code>README.md</code> and <code>INSTALL.txt</code>.</p>
+      <p><b>UKTAS 1.2.2</b> · script format <code>version 1</code> · developed by snok. Shipped as <code>UKTAS_DOCS.html</code> next to <code>README.md</code> and <code>INSTALL.txt</code>.</p>
       <p>Thanks to YALTER (bunnymodXT) and yuu (UNItas) for the tools and ideas this project builds on.</p>
       <p>Single file, no dependencies. Search, the entity finder and the framebulk builder all run locally in this page.</p>
     </footer>

@@ -5,9 +5,9 @@
     <LangVersion>9.0</LangVersion>
     <AssemblyName>UltrakillTAS</AssemblyName>
     <RootNamespace>UltrakillTAS</RootNamespace>
-    <Version>1.2.0</Version>
-    <AssemblyVersion>1.2.0.0</AssemblyVersion>
-    <FileVersion>1.2.0.0</FileVersion>
+    <Version>1.2.2</Version>
+    <AssemblyVersion>1.2.2.0</AssemblyVersion>
+    <FileVersion>1.2.2.0</FileVersion>
     <Product>ULTRAKILL TAS Tool</Product>
     <Description>Deterministic tick-based TAS tool for ULTRAKILL (BepInEx 5 / HarmonyX).</Description>
     <Company>ULTRAKILL TAS</Company>
