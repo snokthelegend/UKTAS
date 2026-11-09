@@ -745,6 +745,20 @@ namespace UltrakillTAS
             }
         }
 
+        /// <summary>The horizontal direction NewMovement drives a slide with, for resume diagnostics.</summary>
+        public bool TryGetSlideDir(out Vector3 direction)
+        {
+            direction = Vector3.zero;
+            object player = NewMovement;
+            if (player == null)
+                return false;
+            object value = GetMember(player, new[] { "slideDir", "dodgeDir" });
+            if (value == null)
+                return false;
+            direction = (Vector3)value;
+            return true;
+        }
+
         public bool TryGetPlayerVelocity(out Vector3 velocity)
         {
             Rigidbody body = PlayerRigidbody;
@@ -1969,6 +1983,26 @@ namespace UltrakillTAS
             sliding = ToBool(GetMember(player, new[] { "sliding" }), false);
             dashing = ToBool(GetMember(player, new[] { "boost" }), false);
             jumping = ToBool(GetMember(player, new[] { "jumping" }), false);
+            return true;
+        }
+
+        /// <summary>
+        /// Slide-recovery counter used by Super Slide Jumps. NewMovement.StopSlide resets it to 0;
+        /// FixedUpdate increments it while not sliding, and TrySSJ accepts it while
+        /// 0 &lt; framesSinceSlide &lt; ssjMaxFrames (the shipped value is 4, so frames 1-3).
+        /// </summary>
+        public bool TryGetSlideRecovery(out int framesSinceSlide, out int ssjMaxFrames)
+        {
+            framesSinceSlide = 0;
+            ssjMaxFrames = 4;
+            object player = NewMovement;
+            if (player == null)
+                return false;
+            object frames = GetMember(player, new[] { "framesSinceSlide" });
+            if (frames == null)
+                return false;
+            framesSinceSlide = ToInt(frames, 0);
+            ssjMaxFrames = Mathf.Max(2, ToInt(GetMember(player, new[] { "ssjMaxFrames" }), 4));
             return true;
         }
 

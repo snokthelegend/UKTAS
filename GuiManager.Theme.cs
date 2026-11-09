@@ -1,4 +1,5 @@
 using System;
+using System.Globalization;
 using System.IO;
 using UnityEngine;
 
@@ -541,11 +542,57 @@ namespace UltrakillTAS
             return result;
         }
 
+        GUIStyle _sliderValueStyle;
+
+        /// <summary>
+        /// A slider that shows the value it is set to. The readout is drawn on the track itself,
+        /// on the side the thumb is not, so every slider in the window can be read at a glance
+        /// without a separate number column and the thumb never sits on top of the number.
+        /// <paramref name="format"/> is a standard .NET format string ("0.00", "0", ...);
+        /// omitted, it shows up to two decimals.
+        /// </summary>
         float Slide(float value, float min, float max, string tip, params GUILayoutOption[] options)
         {
+            return SlideFormat(value, min, max, tip, null, options);
+        }
+
+        float SlideFormat(float value, float min, float max, string tip, string format,
+                          params GUILayoutOption[] options)
+        {
             float result = GUILayout.HorizontalSlider(value, min, max, options);
+            if (Event.current.type == EventType.Repaint)
+                DrawSliderValue(GUILayoutUtility.GetLastRect(), result, min, max, format);
             Tip(tip);
             return result;
+        }
+
+        void DrawSliderValue(Rect track, float value, float min, float max, string format)
+        {
+            if (_sliderValueStyle == null)
+            {
+                _sliderValueStyle = new GUIStyle(GUI.skin.label);
+                _sliderValueStyle.alignment = TextAnchor.MiddleCenter;
+                _sliderValueStyle.fontSize = 10;
+                _sliderValueStyle.fontStyle = FontStyle.Bold;
+                _sliderValueStyle.padding = new RectOffset(0, 0, 0, 0);
+                _sliderValueStyle.clipping = TextClipping.Clip;
+                _sliderValueStyle.wordWrap = false;
+            }
+            string text = string.IsNullOrEmpty(format)
+                ? value.ToString("0.##", CultureInfo.InvariantCulture)
+                : value.ToString(format, CultureInfo.InvariantCulture);
+            float range = max - min;
+            float normalized = range > 0.000001f ? Mathf.Clamp01((value - min) / range) : 0f;
+            const float width = 46f;
+            float x = normalized > 0.5f ? track.x + 5f : track.xMax - width - 5f;
+            Rect rect = new Rect(x, track.y + 1f, width, track.height - 2f);
+            // A shadow first, so the number stays readable over the track and over the thumb.
+            Color previous = GUI.color;
+            GUI.color = new Color(0f, 0f, 0f, 0.85f);
+            GUI.Label(new Rect(rect.x + 1f, rect.y + 1f, rect.width, rect.height), text, _sliderValueStyle);
+            GUI.color = ColText;
+            GUI.Label(rect, text, _sliderValueStyle);
+            GUI.color = previous;
         }
 
         /// <summary>Statuses and notes under a control group: red for errors, muted otherwise.</summary>

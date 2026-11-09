@@ -22,7 +22,6 @@ namespace UltrakillTAS
         const float HitboxRange = 150f;
 
         readonly List<HitboxMarker> _hitboxes = new List<HitboxMarker>(256);
-        readonly Vector3[] _hitboxCorners = new Vector3[8];
         int _hitboxScanFrame = -1000;
 
         /// <summary>Called from UpdateCache (every 10 frames). Cached, never per-Repaint.</summary>
@@ -204,6 +203,7 @@ namespace UltrakillTAS
             Color enemyColor = new Color(1f, 0.22f, 0.22f, 0.9f);
             Color playerColor = new Color(0.25f, 1f, 0.45f, 0.95f);
 
+            Plane near = NearPlane(camera);
             GL.PushMatrix();
             _lineMaterial.SetPass(0);
             GL.LoadPixelMatrix();
@@ -218,25 +218,31 @@ namespace UltrakillTAS
                 Bounds bounds = collider.bounds;
                 Vector3 min = bounds.min;
                 Vector3 max = bounds.max;
-                for (int c = 0; c < 8; c++)
-                {
-                    Vector3 corner = new Vector3((c & 1) != 0 ? max.x : min.x,
-                                                 (c & 2) != 0 ? max.y : min.y,
-                                                 (c & 4) != 0 ? max.z : min.z);
-                    _hitboxCorners[c] = ToViewport(camera, corner);
-                }
                 for (int e = 0; e < BoxEdges.Length; e += 2)
                 {
-                    Vector3 a = _hitboxCorners[BoxEdges[e]];
-                    Vector3 b = _hitboxCorners[BoxEdges[e + 1]];
-                    if (a.z <= 0f || b.z <= 0f)
+                    Vector3 a = HitboxCorner(min, max, BoxEdges[e]);
+                    Vector3 b = HitboxCorner(min, max, BoxEdges[e + 1]);
+                    Vector3 clippedA;
+                    Vector3 clippedB;
+                    if (!ClipSegmentToNear(a, b, near, out clippedA, out clippedB))
                         continue;
-                    GL.Vertex3(a.x * width, a.y * height, 0f);
-                    GL.Vertex3(b.x * width, b.y * height, 0f);
+                    Vector3 va = ToViewport(camera, clippedA);
+                    Vector3 vb = ToViewport(camera, clippedB);
+                    if (va.z <= 0f || vb.z <= 0f)
+                        continue;
+                    GL.Vertex3(va.x * width, va.y * height, 0f);
+                    GL.Vertex3(vb.x * width, vb.y * height, 0f);
                 }
             }
             GL.End();
             GL.PopMatrix();
+        }
+
+        static Vector3 HitboxCorner(Vector3 min, Vector3 max, int index)
+        {
+            return new Vector3((index & 1) != 0 ? max.x : min.x,
+                               (index & 2) != 0 ? max.y : min.y,
+                               (index & 4) != 0 ? max.z : min.z);
         }
     }
 }

@@ -42,11 +42,39 @@ namespace UltrakillTAS
 
         bool _anglesInitialized;
         bool _skipFirstFrame;
+        // A state was just loaded: the next StartPlayback must not spend the neutral warm-up
+        // frame, which would release the saved slide/dash keys before the first tick.
+        bool _loadedStateAwaitingPlay;
+        // A load requested mid-frame is applied at the end of that frame, after the game's
+        // Update has run: the next update the game evaluates is then the first scripted tick's,
+        // not a leftover frame of the world the load is replacing.
+        int _pendingLoadSlot = -1;
+        // A user load that reloads the map checkpoint first: the game's own respawn runs when the
+        // load is requested and the savestate restore waits in EndFrame until the room clones the
+        // respawn destroys with Object.Destroy have actually been flushed.
+        int _checkpointReloadSlot = -1;
+        int _checkpointReloadWait;
+        // A load must not lose the landing edge autoslide reacts to; the first resumed tick
+        // engages the slide once, from the restored onGround flag.
+        bool _forceAutoslideEngage;
+        // Capital-S autoslide: true on the next eligible tick that should press Slide.
+        bool _spamAutoslideOn = true;
         // Reseed when tick 0 runs, after any scene settling and control wait. Frames that
         // ran during loading draw random numbers too, so the seed set at Play is not enough.
         bool _reseedAtFirstTick;
         readonly DeterminismTrace _trace = new DeterminismTrace();
         bool _resumeAfterFirstTick;
+        // Tick to report the first post-resume physics step for, or -1. A resume that loses a
+        // tick shows up here first: the tick runs but the clock spent no step on it.
+        int _resumeTickCheck = -1;
+        // Tick whose post-resume probe line is logged next, or -1. Two lines per resume (the
+        // restored tick and the one after it) make a drift readable in the log instead of by eye.
+        int _norefreshProbeTick = -1;
+        // The script cursor the loaded state was captured at. A load resumes there instead of
+        // replaying the script from tick 0 onto a mid-run world (the input desync).
+        int _resumeTick = -1;
+        double _resumeTime;
+        string _resumeScript;
         bool _suppressRecordFrame;
         TasButtons _recordButtons;
         string _recordingPath = string.Empty;
@@ -209,6 +237,10 @@ namespace UltrakillTAS
             _states = states;
             _rng = rng;
             PlaybackSpeed = 1.0;
+            // Savestates remember the script cursor they were taken at (see PerformLoadState).
+            states.TickProvider = () => CurrentTick;
+            states.TimeProvider = () => CurrentTime;
+            states.ScriptProvider = () => _scriptPath;
         }
 
         // ------------------------------------------------------------------
@@ -456,8 +488,28 @@ namespace UltrakillTAS
             // An in-place start (current state or a startup state load) has no scene reload to
             // hide the align frame behind, so run it first and start the run afterwards. A state
             // load replaces what that frame stepped; a plain in-place start restores a snapshot.
+            // A norefresh checkpoint carries the sub-tick phase the run had at that tick.
+            // Unity's fixed accumulator cannot be written, so the align frame re-creates it
+            // BEFORE the restore overwrites the world: aligning to the saved phase instead of
+            // PhaseTarget is what makes the resumed tick step physics on the same boundary as
+            // continuous playback.
+            double alignPhase = TimeController.PhaseTarget;
+            if (_norefreshHit != null)
+            {
+                double savedPhase;
+                if (_states.TryGetSavedPhysicsPhase(_norefreshHit.State, out savedPhase))
+                    alignPhase = savedPhase;
+            }
+            else if (_startupType == TasStartType.LoadState)
+            {
+                // Same rule for a header 'load_state': the state carries its own phase.
+                double savedPhase;
+                Savestate slotState = _states.GetSlot(_startupSlot);
+                if (slotState != null && _states.TryGetSavedPhysicsPhase(slotState, out savedPhase))
+                    alignPhase = savedPhase;
+            }
             if ((_startupType == TasStartType.None || _startupType == TasStartType.LoadState) &&
-                DeferForAlign(BeginRun))
+                DeferForAlign(BeginRun, alignPhase))
             {
                 if (_startupType == TasStartType.None && _norefreshHit == null)
                     _alignGuard = _states.CaptureTransient("align");
@@ -490,6 +542,7 @@ namespace UltrakillTAS
                 }
                 else
                 {
+                    RememberResumePoint(_states.GetSlot(_startupSlot));
                     NotifyStateLoaded();
                 }
             }
@@ -512,9 +565,9 @@ namespace UltrakillTAS
         /// Returns false (nothing queued, run it now) when alignment is off, the clock is not
         /// ours, or the phase is already aligned.
         /// </summary>
-        bool DeferForAlign(Action action)
+        bool DeferForAlign(Action action, double phase = TimeController.PhaseTarget)
         {
-            if (!_plugin.AlignFixedStepPhase.Value || !_time.Active || !_time.QueueFixedStepAlign())
+            if (!_plugin.AlignFixedStepPhase.Value || !_time.Active || !_time.QueueFixedStepAlign(phase))
                 return false;
             _afterAlign = action;
             // The align frame is the one after this frame's EndFrame; one more frame lets the
@@ -526,17 +579,140 @@ namespace UltrakillTAS
         /// <summary>Loads a savestate slot (hotkey or GUI), aligning the physics phase first when the engine owns a frozen clock.</summary>
         public void LoadStateSlot(int slot)
         {
+            // Align to the phase the state was captured on, not to PhaseTarget: the restored
+            // world must keep stepping physics on the same boundary it did when saved.
+            double alignPhase = TimeController.PhaseTarget;
+            Savestate slotState = _states.GetSlot(slot);
+            double savedPhase;
+            if (slotState != null && _states.TryGetSavedPhysicsPhase(slotState, out savedPhase))
+                alignPhase = savedPhase;
             if ((Mode == EngineMode.Paused || Mode == EngineMode.Standalone) &&
-                DeferForAlign(() => LoadStateNow(slot)))
+                DeferForAlign(() => LoadStateNow(slot), alignPhase))
                 return;
             LoadStateNow(slot);
         }
 
         void LoadStateNow(int slot)
         {
-            SaveResult result = _states.Load(slot);
+            // A new request supersedes a checkpoint reload that has not restored yet.
+            _checkpointReloadWait = 0;
+            _checkpointReloadSlot = -1;
+
+            // The game's own checkpoint load first (StatsManager.Restart -> currentCheckPoint
+            // .OnRespawn, the same call the pause menu's CHECKPOINT makes). The restore then
+            // waits for that respawn to settle; see EndFrame.
+            if (TryBeginCheckpointReload(slot))
+                return;
+
+            // Restoring inside the engine's Update would leave the rest of this frame's game
+            // Update (NewMovement included) to run on the restored world before tick K's input
+            // is injected. Defer to EndFrame, which runs after that Update, so the load frame
+            // cannot advance anything: restore -> first tick, with nothing in between.
+            if (Mode == EngineMode.Paused || Mode == EngineMode.Playing)
+            {
+                _pendingLoadSlot = slot;
+                return;
+            }
+            PerformLoadState(slot);
+        }
+
+        /// <summary>
+        /// Runs the game's checkpoint reload for a user load, when the opt-in setting is on and
+        /// the level has a checkpoint. The restore is then queued two frames out so the game's
+        /// deferred destruction of the old room clones happens before the restore writes into
+        /// the world. False: the load runs normally (no checkpoint, setting off, finished level).
+        /// </summary>
+        /// <summary>
+        /// The pause menu's CHECKPOINT is about to run. Snapshot the sweepable world first, so
+        /// the rooms its respawn builds are protected from the restore that follows.
+        /// </summary>
+        public void BeginCheckpointButtonReload()
+        {
+            _states.BeginCheckpointReloadSnapshot();
+        }
+
+        /// <summary>
+        /// The pause menu's CHECKPOINT has finished the game's own checkpoint load. With the
+        /// setting on, put the active savestate back on top of it: the restore runs from
+        /// EndFrame two frames later, after the game's deferred room destruction has flushed.
+        /// </summary>
+        public void EndCheckpointButtonReload()
+        {
+            _states.EndCheckpointReloadSnapshot();
+
+            if (_plugin.ResetToMapCheckpointOnLoad == null || !_plugin.ResetToMapCheckpointOnLoad.Value)
+                return;
+            if (Mode == EngineMode.Starting)
+                return;
+
+            // The pause button is only meaningful with a live checkpoint and an unfinished level
+            // (OptionsManager.RestartCheckpoint unpauses and calls StatsManager.Restart).
+            object stats = _bridge.StatsManager;
+            object checkpoint = stats != null ? _bridge.GetMember(stats, new[] { "currentCheckPoint" }) : null;
+            if (!GameBridge.IsAlive(checkpoint))
+                return;
+            object infoSent = stats != null ? _bridge.GetMember(stats, new[] { "infoSent" }) : null;
+            if (infoSent is bool && (bool)infoSent)
+                return;
+
+            int slot = _plugin.ActiveStateSlot != null
+                ? Mathf.Clamp(_plugin.ActiveStateSlot.Value, 0, SaveStateManager.SlotCount - 1) : 0;
+            if (_states.GetSlot(slot) == null)
+            {
+                _plugin.Toast("CHECKPOINT: savestate slot " + slot + " is empty; only the checkpoint was loaded.", true);
+                return;
+            }
+
+            _pendingLoadSlot = -1;
+            _checkpointReloadSlot = slot;
+            _checkpointReloadWait = 2;
+            _plugin.LogInfo("Pause-menu CHECKPOINT: restoring savestate slot " + slot +
+                            " after the checkpoint reload settles.");
+        }
+
+        bool TryBeginCheckpointReload(int slot)
+        {
+            if (_plugin.ResetToMapCheckpointOnLoad == null || !_plugin.ResetToMapCheckpointOnLoad.Value)
+                return false;
+            if (_states.GetSlot(slot) == null)
+                return false;
+            if (!_states.ResetToMapCheckpoint())
+                return false;
+            _checkpointReloadSlot = slot;
+            _checkpointReloadWait = 2;
+            _plugin.LogInfo("Savestate slot " + slot +
+                            " restores after the game checkpoint reload settles.");
+            return true;
+        }
+
+        /// <summary>The restore itself. Runs between frames when the engine owns the clock.</summary>
+        void PerformLoadState(int slot, bool mapCheckpointAlreadyReloaded = false)
+        {
+            RememberResumePoint(_states.GetSlot(slot));
+            SaveResult result = _states.Load(slot, !mapCheckpointAlreadyReloaded);
             if (result.Success)
                 NotifyStateLoaded();
+        }
+
+        /// <summary>
+        /// Store the timeline the state was captured at. A state stores the tick that was about
+        /// to run (it is captured at the end of the previous frame), so resuming runs that tick
+        /// once, not tick K again and not K + 2.
+        /// </summary>
+        void RememberResumePoint(Savestate state)
+        {
+            if (state != null && state.HasTimeline && state.Tick > 0)
+            {
+                _resumeTick = state.Tick;
+                _resumeTime = state.ScriptTime;
+                _resumeScript = state.ScriptPath ?? string.Empty;
+            }
+            else
+            {
+                _resumeTick = -1;
+                _resumeTime = 0.0;
+                _resumeScript = null;
+            }
         }
 
         void ResolveStartup()
@@ -763,10 +939,18 @@ namespace UltrakillTAS
             _startupType = TasStartType.None;
             Mode = EngineMode.Playing;
             Finished = false;
-            CurrentTick = 0;
-            CurrentTime = 0.0;
+            BakeManager.PureInputOnly = false;
+            // A resume-only frame adjust belongs to the previous norefresh run.
+            if (_script != null)
+                _script.SetFrameAdjust(-1, 0);
+            bool resumeScript = _loadedStateAwaitingPlay && _resumeTick > 0 && _script != null &&
+                                string.Equals(_resumeScript ?? string.Empty, _scriptPath ?? string.Empty, StringComparison.Ordinal);
+            CurrentTick = resumeScript ? Mathf.Clamp(_resumeTick, 0, _script.TotalTicks) : 0;
+            CurrentTime = resumeScript ? _resumeTime : 0.0;
             // Submission guard: a fresh run from tick 0 starts with clean per-run bake latches.
             BakeManager.BeginRun();
+            // Only a norefresh resume may arm the automatic bake_end below.
+            _time.Bake.CancelNorefreshAutoEnd();
             _currentLine = null;
             _currentLineIndex = -1;
             _anglesInitialized = false;
@@ -775,8 +959,15 @@ namespace UltrakillTAS
             _time.ClearPendingSteps();
             _time.RequestStep(1);
             _time.Turbo = FastForward;
-            _skipFirstFrame = true;
+            // A neutral warm-up frame is right for a fresh run, but after a state load it would
+            // release the held mask the restore just put back on the first frame, and NewMovement
+            // cancels a slide on a release. The loaded run starts on its first tick instead.
+            _skipFirstFrame = !_loadedStateAwaitingPlay;
+            _forceAutoslideEngage = _loadedStateAwaitingPlay;
+            _spamAutoslideOn = true;
+            _loadedStateAwaitingPlay = false;
             _resumeAfterFirstTick = true;
+            _resumeTickCheck = resumeScript ? CurrentTick : -1;
             _reseedAtFirstTick = reseedRng;
             // There is nothing to wait for on the title screen or during boot: with no
             // player in the scene the wait would never end. A script that starts in a
@@ -801,7 +992,9 @@ namespace UltrakillTAS
                 ApplyStartFist();
             }
             // A resumed checkpoint is mid-run: it must not become the Rewind start state.
-            if (!_waitForControl && _plugin.CaptureStartState.Value && _norefreshHit == null)
+            // A resumed state is mid-run: capturing it as the "start" state would make Rewind
+            // jump to tick 0 of the script with a world from tick K.
+            if (!_waitForControl && _plugin.CaptureStartState.Value && _norefreshHit == null && !resumeScript)
                 _states.CaptureStartState(0, 0.0);
             InitAnglesFromGame();
             _plugin.Toast("Playing " + (string.IsNullOrEmpty(_scriptPath) ? "script" : Path.GetFileName(_scriptPath)) +
@@ -1195,6 +1388,8 @@ namespace UltrakillTAS
             // F11: stop and give the screen back at the current tick.
             EndNoRefresh(false);
             _trace.Close();
+            if (_script != null)
+                _script.SetFrameAdjust(-1, 0);
             Mode = EngineMode.Idle;
             Finished = false;
             FastForward = false;
@@ -1214,6 +1409,8 @@ namespace UltrakillTAS
             _afterAlign = null;
             _alignGuard = null;
             _norefreshHit = null;
+            if (_time != null && _time.Bake != null)
+                _time.Bake.CancelNorefreshSync();
             _clickSceneBase = -1;
             // The scripted pointer must not outlive the script: reset it first so the
             // release below hands the real mouse straight back.
@@ -1222,6 +1419,7 @@ namespace UltrakillTAS
             _input.ReleaseControl();
             _pauseAtTick = -1;
             _branchTick = -1;
+            _states.ReleasePlayerLoadHold();
             _states.ClearHistory();
             _recordedTailTick = -1;
             _branchState = null;
@@ -1555,6 +1753,9 @@ namespace UltrakillTAS
             _skipFirstFrame = false;
             _resumeAfterFirstTick = false;
             _suppressRecordFrame = false;
+            // Back to tick 0: drop the resume-only bulk frame adjust with the resume itself.
+            if (_script != null)
+                _script.SetFrameAdjust(-1, 0);
             CurrentTick = 0;
             CurrentTime = 0.0;
             Finished = false;
@@ -1786,6 +1987,41 @@ namespace UltrakillTAS
         /// checksum above it and the same level instance loaded. Null when nothing can resume.
         /// Entries whose checksum no longer matches the script are dropped here.
         /// </summary>
+        /// <summary>
+        /// One line of the checkpoint/resume comparison: tick, position, velocity, ground
+        /// contact, held buttons and the fixed-step state, at exactly the boundary a resume has
+        /// to match. Logged for the checkpoint tick and for the tick after it in both runs, so
+        /// the two logs show whether the first resumed tick stepped physics like the original.
+        /// </summary>
+        void LogResumeProbe(string tag)
+        {
+            if (_plugin.TraceDeterminism == null || !_plugin.TraceDeterminism.Value)
+                return;
+            Vector3 position;
+            Vector3 velocity;
+            // While a load hold pins V1, the Rigidbody is kinematic and reads zero velocity;
+            // compare against the saved body instead so the determinism probe is honest.
+            if (!_states.TryGetHeldPlayerPosition(out position))
+                _bridge.TryGetPlayerPosition(out position);
+            if (!_states.TryGetHeldPlayerVelocity(out velocity))
+                _bridge.TryGetPlayerVelocity(out velocity);
+            bool onGround, sliding, dashing, jumping;
+            bool known = _bridge.TryGetMovementState(out onGround, out sliding, out dashing, out jumping);
+            _plugin.LogInfo("probe " + tag + " tick " + CurrentTick + ": pos " + position.ToString("0.#####") +
+                            " vel " + velocity.ToString("0.#####") +
+                            " grounded " + (known ? onGround.ToString() : "?") +
+                            " sliding " + (known ? sliding.ToString() : "?") +
+                            " buttons " + _lastButtons +
+                            " acc " + _time.PhysicsAccumulatorSeconds.ToString("0.######") +
+                            " steps " + _time.LastTickSteps);
+        }
+
+        bool PlayerGrounded()
+        {
+            bool onGround, sliding, dashing, jumping;
+            return _bridge.TryGetMovementState(out onGround, out sliding, out dashing, out jumping) && onGround;
+        }
+
         NorefreshEntry FindNorefreshHit()
         {
             if (!_plugin.UseNorefresh.Value || _script == null)
@@ -1810,20 +2046,67 @@ namespace UltrakillTAS
         }
 
         /// <summary>
-        /// Caches the state the first time a run reaches a checkpoint. It runs before the tick's
-        /// commands and input, so restoring the entry replays exactly what the first run did.
+        /// Caches the state the first time a run reaches a checkpoint. Called from EndFrame on the
+        /// frame whose tick precedes the checkpoint, so the state is the world as that frame left
+        /// it: before the checkpoint tick's physics, after the frame's own Update. A resume then
+        /// runs the checkpoint tick on an ordinary frame, which gives it exactly one physics step
+        /// and one full-delta Update, like continuous playback.
         /// </summary>
         void CaptureNorefreshIfDue()
         {
             // Optimizer attempts play throwaway candidates: caching one per attempt would only grow memory.
             if (!_plugin.UseNorefresh.Value || _script == null || _optimAttempts)
                 return;
-            TasCheckpoint checkpoint = _script.CheckpointAt(CurrentTick);
+            int offset = _plugin.NorefreshTickOffset != null ? _plugin.NorefreshTickOffset.Value : 0;
+            TasCheckpoint checkpoint = _script.CheckpointAt(CurrentTick + offset);
             if (checkpoint == null || _states.HasNorefresh(checkpoint.Hash))
                 return;
+            NorefreshInput input = new NorefreshInput
+            {
+                Buttons = _lastButtons,
+                ReleaseButtons = _releaseButtons,
+                PointerActive = _input.Pointer.Active,
+                PointerPosition = _input.Pointer.Position,
+                PointerButtons = (_input.Pointer.Left ? ButtonLeft : 0) |
+                                 (_input.Pointer.Right ? ButtonRight : 0) |
+                                 (_input.Pointer.Middle ? ButtonMiddle : 0),
+                PointerGlideTicks = _input.Pointer.GlideTicksLeft,
+                PointerGlideTarget = _input.Pointer.GlideTarget
+            };
+            // The capture offset can move the state a few ticks either side of the marker, so the
+            // script time stored with it comes from the marker's own tick, not from the frame:
+            // the resume sets CurrentTick and CurrentTime from the entry and they must agree, or
+            // every 'change ... over' ramp and the level clock start some ticks off.
+            //
+            // A negative offset caches the state at the end of that tick's own frame, so its
+            // Update-side clock (level timer/framecount, weapon recharge, style freshness) is one
+            // frame past the boundary the resume starts on. That frame is rewound out of the
+            // state, or the resumed run counts one frame more than continuous playback does.
+            double clockRewind = offset < 0 ? -offset * _script.FrametimeAtTick(checkpoint.Tick) : 0.0;
             if (_states.CaptureNorefresh(checkpoint.Hash, checkpoint.Label, checkpoint.Tick,
-                                         VirtualPitch, VirtualYaw, _lastButtons, CurrentTime))
+                                         VirtualPitch, VirtualYaw, _script.TimeAtTick(checkpoint.Tick), input,
+                                         clockRewind))
+            {
                 _plugin.LogInfo("norefresh checkpoint '" + checkpoint.Label + "' cached at tick " + checkpoint.Tick + ".");
+                // Optional sync bake: every tick from the resume boundary to the next bake block
+                // or the script end is recorded on this continuous run into a temp .ukbake, so a
+                // resume can write them back and re-sync every tick. It is stamped with the
+                // script's hash over exactly that tick range.
+                if (_plugin.NorefreshBakeSync != null && _plugin.NorefreshBakeSync.Value)
+                    _time.Bake.BeginNorefreshSync(_script, checkpoint.Tick + 1);
+                else
+                    _time.Bake.CancelNorefreshSync();
+                // Continuous-playback half of the determinism pair: the resume writes the same
+                // row right after its restore, so the two can be compared directly.
+                if (_plugin.TraceDeterminism != null && _plugin.TraceDeterminism.Value)
+                {
+                    _resumeProbeTick = checkpoint.Tick + 1;
+                    LogResumeProbe("checkpoint");
+                    _trace.Checkpoint(checkpoint.Tick, _bridge, _time.PhysicsAccumulatorSeconds,
+                                      _time.LastTickSteps, VirtualPitch, VirtualYaw, _rng.UnityStateHash(),
+                                      PlayerGrounded());
+                }
+            }
         }
 
         /// <summary>Restores the chosen checkpoint after Play has started, and moves the tick counter to it.</summary>
@@ -1834,10 +2117,13 @@ namespace UltrakillTAS
             if (entry == null)
                 return;
 
+            // A checkpoint resume is a raw-input determinism test: never let baked playback
+            // write the recorded world over it. StartPlayback clears this for a fresh run.
+            BakeManager.PureInputOnly = true;
+
             // Clear input before the load, as a normal load does, so no button or
             // queued click from the run that cached the checkpoint carries into it.
             _input.ReleaseAll();
-            _releaseButtons = 0;
             _input.SetActive(true);
             SaveResult result = _states.RestoreNorefresh(entry);
             if (!result.Success)
@@ -1854,12 +2140,123 @@ namespace UltrakillTAS
             CurrentTime = entry.Time;
             VirtualPitch = entry.Pitch;
             VirtualYaw = entry.Yaw;
-            _lastButtons = entry.Buttons;
+            // Debug "Bulk frames" dial: the framebulk the resume starts in may hold a few ticks
+            // more or fewer for this playback. It is a transient timeline adjustment, so the
+            // script, its checksum and anything saved from it keep the authored counts.
+            if (_script != null)
+            {
+                int bulkFrames = _plugin.NorefreshBulkFrames != null ? _plugin.NorefreshBulkFrames.Value : 0;
+                TickLocation resumeLine = _script.Locate(entry.Tick);
+                _script.SetFrameAdjust(bulkFrames != 0 && resumeLine.Valid ? resumeLine.LineIndex : -1, bulkFrames);
+            }
+            // Probe pair for the log: this tick as restored, then the tick after it. Comparing
+            // those two lines with continuous playback shows which of tick/clock/pose drifts.
+            _norefreshProbeTick = entry.Tick + 1;
+            _plugin.LogInfo("norefresh probe at resume: " + NorefreshProbeText());
+            // Sync bake: every tick recorded after this boundary is written over the same
+            // resumed ticks. ArmNorefreshSync re-hashes those rows first, so an edited range
+            // leaves nothing to load and the resume plays live as before.
+            if (_plugin.NorefreshBakeSync != null && _plugin.NorefreshBakeSync.Value)
+                _time.Bake.ArmNorefreshSync(_script, entry.Tick + 1);
+            else
+                _time.Bake.CancelNorefreshSync();
+            // Auto bake_end: only a norefresh resume does this. The bake block the resume
+            // lands in is closed when the sync window ends, as if a bake_end stood there;
+            // the script, its block ranges and its .ukbake files are not changed.
+            if (_plugin.NorefreshBakeSync != null && _plugin.NorefreshBakeSync.Value)
+                _time.Bake.ArmNorefreshBakeEnd(entry.Tick,
+                    _plugin.NorefreshSyncTicks != null ? _plugin.NorefreshSyncTicks.Value : 0);
+            else
+                _time.Bake.CancelNorefreshAutoEnd();
+            // Raw input state, not just the action mask: a 'click' queued by the tick before the
+            // checkpoint must still be released on the resumed tick, and a pointer left active by
+            // an earlier 'pointer'/'glide' command must keep its position and buttons. Releasing
+            // everything above and restoring the held mask here reproduces the exact frame edge
+            // state continuous playback has at the start of this tick.
+            _lastButtons = entry.Input.Buttons;
+            _releaseButtons = entry.Input.ReleaseButtons;
+            _input.Pointer.Active = entry.Input.PointerActive;
+            _input.Pointer.Position = entry.Input.PointerPosition;
+            _input.Pointer.Left = (entry.Input.PointerButtons & ButtonLeft) != 0;
+            _input.Pointer.Right = (entry.Input.PointerButtons & ButtonRight) != 0;
+            _input.Pointer.Middle = (entry.Input.PointerButtons & ButtonMiddle) != 0;
+            _input.Pointer.GlideTicksLeft = entry.Input.PointerGlideTicks;
+            _input.Pointer.GlideTarget = entry.Input.PointerGlideTarget;
+            // ReleasePending zeroes the one-tick wheel value at the start of the tick; keeping the
+            // captured notch would inject it twice.
+            _input.Pointer.Scroll = 0f;
             _anglesInitialized = true;
             // The checkpoint is mid-run, so the start-of-level wait does not apply to it.
             _waitForControl = false;
             _captureStartAfterWait = false;
+            // StartPlayback armed the neutral warm-up frame a fresh run needs. A resume must not
+            // spend it: it runs _input.InjectNeutral(), which drops the held mask the checkpoint
+            // just restored, so the first tick would see every held button as a NEW press (an
+            // extra jump on a held 'j') and one edge-triggered action would fire twice.
+            _skipFirstFrame = false;
+            // Diagnostic: compare the restored state with the one the continuous run recorded at
+            // the same tick, while both are still in hand. A mismatch here is the moment the
+            // resume stopped matching, not a later symptom.
+            if (_plugin.TraceDeterminism != null && _plugin.TraceDeterminism.Value)
+            {
+                _resumeProbeTick = entry.Tick + 1;
+                LogResumeProbe("restored");
+                string verdict = _trace.Restored(entry.Tick, _bridge, _time.PhysicsAccumulatorSeconds,
+                                                 _time.LastTickSteps, VirtualPitch, VirtualYaw, _rng.UnityStateHash(),
+                                                 PlayerGrounded());
+                if (verdict != null)
+                {
+                    if (_trace.LastRestoreMatched)
+                        _plugin.LogInfo("Determinism trace: " + verdict);
+                    else
+                        _plugin.LogWarning("Determinism trace: " + verdict);
+                }
+            }
+            // Do NOT execute the restored tick here.
+            //
+            // The cached state is the end of the frame before this tick: its physics step has not
+            // run yet, and that frame's own Update accounting (level timer, dash recharge and
+            // whatever the game moves in Update) is already inside it. Resuming therefore lets the
+            // next ordinary frame run the tick: Unity runs exactly one physics step for it, and the
+            // game's Update runs with the tick's full frametime, exactly as continuous playback did.
+            // Executing it on this frame instead would run it at the frozen capture delta: the tick
+            // would be counted, its physics would be the checkpoint's own step (double), and the
+            // frame's Update accumulation - timer and recharge - would be lost.
+            _resumeTickCheck = entry.Tick;
+            _time.ClearPendingSteps(true);
+            _time.Paused = false;
             _plugin.Toast("Resumed from norefresh checkpoint at tick " + entry.Tick + ".", false);
+        }
+
+        /// <summary>
+        /// One line of the values a resume has to match: the script tick and clock, the game's own
+        /// level clock (StatsManager.seconds, the framecount), the player position and the angles
+        /// the current framebulk resolved. Logged at the restored tick and at the tick after it.
+        /// </summary>
+        string NorefreshProbeText()
+        {
+            string position;
+            Transform player = _bridge.PlayerTransform;
+            if (player != null)
+            {
+                Vector3 p = player.position;
+                position = p.x.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture) + " " +
+                           p.y.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture) + " " +
+                           p.z.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture);
+            }
+            else
+            {
+                position = "(no player)";
+            }
+            float timer;
+            if (!_bridge.TryGetLevelTime(out timer))
+                timer = 0f;
+            return "tick " + CurrentTick +
+                   " time " + CurrentTime.ToString("0.000", System.Globalization.CultureInfo.InvariantCulture) +
+                   " timer " + timer.ToString("0.000", System.Globalization.CultureInfo.InvariantCulture) +
+                   " pos " + position +
+                   " pitch " + VirtualPitch.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture) +
+                   " yaw " + VirtualYaw.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture);
         }
 
         /// <summary>Forget every cached checkpoint: the next Play runs the script from tick 0.</summary>
@@ -1936,7 +2333,10 @@ namespace UltrakillTAS
             {
                 if (Mode == EngineMode.Starting)
                     _input.ReleaseControl();
-                if (--_afterAlignDelay <= 0)
+                // Wait until the queued align frame has really advanced Unity's clock: a frame
+                // spent at the game's scale 0 (pause menu, hitstop) changes nothing, and the
+                // restore would then start on a different sub-step boundary.
+                if (!_time.AlignmentPending && --_afterAlignDelay <= 0)
                 {
                     Action action = _afterAlign;
                     _afterAlign = null;
@@ -2102,7 +2502,10 @@ namespace UltrakillTAS
             {
                 bool run = _time.BeginFrame();
                 if (run)
+                {
+                    _states.ReleasePlayerLoadHold();
                     ApplyStandaloneInput();
+                }
                 else if (!_time.PacingSkip)
                     _input.InjectNeutral();
                 return;
@@ -2423,6 +2826,21 @@ namespace UltrakillTAS
             _time.FullFreezeAllowed = Mode != EngineMode.Idle && Mode != EngineMode.Starting &&
                                       !_startupPending && !_holdScene && !_waitForControl && _afterAlign == null;
 
+            // A load that ran the game's checkpoint respawn restores only after the room clones
+            // it replaced have been destroyed for real: Object.Destroy is deferred to the end of
+            // the respawn frame, and writing the savestate into objects that are already queued
+            // to die loses everything the respawn built. Two frames is one flush plus a settle.
+            if (_checkpointReloadWait > 0 && --_checkpointReloadWait == 0)
+            {
+                int slot = _checkpointReloadSlot;
+                _checkpointReloadSlot = -1;
+                if (slot >= 0)
+                {
+                    _plugin.LogInfo("Restoring savestate slot " + slot + " after the checkpoint reload.");
+                    PerformLoadState(slot, true);
+                }
+            }
+
             if (Mode == EngineMode.Recording)
             {
                 if (_suppressRecordFrame)
@@ -2440,6 +2858,30 @@ namespace UltrakillTAS
                 _time.EndFrame();
                 return;
             }
+
+            // A checkpoint belongs to the tick about to run, so its state is taken here, at the
+            // end of a frame that ran a tick; only those are valid boundaries. Which marker that
+            // boundary belongs to is decided by the debug capture offset (0 = the marker whose
+            // tick this frame ran, +1 = one tick earlier, -1 = one tick later).
+            if (_time.LastFrameAdvanced)
+                CaptureNorefreshIfDue();
+
+            if (_pendingLoadSlot >= 0)
+            {
+                int slot = _pendingLoadSlot;
+                _pendingLoadSlot = -1;
+                PerformLoadState(slot);
+            }
+
+            // A loaded state that has not run a tick yet stays pinned to the exact saved
+            // pose. In a paused frame the game scripts are frozen anyway; this also covers
+            // loads made while the tool does not own the clock (Idle/Standalone).
+            _states.MaintainPlayerLoadHold();
+
+            // Idle means no tick is coming, so an Idle load would otherwise stay pinned
+            // forever. The restore is complete; hand the body back at the end of this frame.
+            if (Mode == EngineMode.Idle)
+                _states.ReleasePlayerLoadHold();
 
             ArmNextFrameTime();
             UpdateSlowMotion();
@@ -2516,6 +2958,11 @@ namespace UltrakillTAS
                 StopInternal(true);
                 return;
             }
+            // The load is complete: release the hold on the first tick attempt, including one
+            // that turns out to be past the end of the script. Otherwise a load at the final
+            // tick would leave V1 kinematic after playback ends.
+            _states.ReleasePlayerLoadHold();
+
             if (CurrentTick >= _script.TotalTicks)
             {
                 FinishPlayback();
@@ -2531,14 +2978,27 @@ namespace UltrakillTAS
 
             ApplyPendingReseed();
 
+            if (_norefreshProbeTick >= 0 && CurrentTick == _norefreshProbeTick)
+            {
+                _norefreshProbeTick = -1;
+                _plugin.LogInfo("norefresh probe at next tick: " + NorefreshProbeText());
+            }
+
+            // State at the start of the tick after the checkpoint: if the resumed tick stepped
+            // physics like the original, this probe matches the one the first run logged.
+            if (_resumeProbeTick >= 0 && CurrentTick == _resumeProbeTick)
+            {
+                _resumeProbeTick = -1;
+                LogResumeProbe("next-tick");
+            }
+
             if (_plugin.TraceDeterminism != null && _plugin.TraceDeterminism.Value)
             {
                 long traceStart = FastForwardProfiler.Now();
-                _trace.Row(CurrentTick, _bridge);
+                _trace.Row(CurrentTick, _bridge, _time.PhysicsAccumulatorSeconds, _time.LastTickSteps,
+                           VirtualPitch, VirtualYaw, _rng.UnityStateHash(), PlayerGrounded());
                 FastForwardProfiler.AddTrace(FastForwardProfiler.Ms(traceStart));
             }
-
-            CaptureNorefreshIfDue();
 
             // Optional: keep the ring filled during continuous playback too, so a
             // pause can scrub back through the last N ticks.
@@ -2557,11 +3017,12 @@ namespace UltrakillTAS
             // unless the individual command is prefixed with "once:". Special
             // frames (save / seed / change ... / target_yaw) act once, on the
             // first tick of the line they occupy.
+            TasStartFist fistTarget = TasStartFist.Unchanged;
             if (location.TickWithinLine == 0)
             {
-                // Zero-tick marker lines (record_video / record_video_stop) never own a tick, so
-                // the ones directly above this line fire here, ahead of its own commands.
-                ExecuteZeroTickMarkers(location);
+                // Zero-tick marker lines (fist / record_video / record_video_stop) never own a
+                // tick, so the ones directly above this line fire here, ahead of its commands.
+                fistTarget = ExecuteZeroTickMarkers(location);
                 ExecuteSpecialFrame(line);
                 ExecuteCommands(line.Commands, location, false);
             }
@@ -2629,6 +3090,7 @@ namespace UltrakillTAS
             TasButtons appliedButtons = line.IsFramebulk ? line.Buttons : _lastButtons;
             TasButtons injected = ApplyShotgunSwap(ApplyMovementAutofuncs(appliedButtons, autofuncs));
             injected = ApplyAimAutofuncs(injected, autofuncs);
+            injected = ApplyFistDirective(injected, appliedButtons, fistTarget);
             // 'e' turns the view only on the tick it fires, and only for that tick: the angles
             // injected here are separate from VirtualPitch/VirtualYaw, so the script's own angle
             // is back on the next tick.
@@ -2637,6 +3099,33 @@ namespace UltrakillTAS
             injected = ApplyDeadcoin(injected, autofuncs,
                 line.IsFramebulk && location.TickWithinLine == 0, ref injectPitch, ref injectYaw);
             _input.ApplyFrame(injected, _autofuncRepeat, injectPitch, injectYaw);
+
+            // First tick after a norefresh resume: say whether the clock actually spent a
+            // physics step on it. A zero here with a full frametime is the resume dropping
+            // that tick's simulation, not a later accumulation error.
+            if (_resumeTickCheck >= 0 && CurrentTick == _resumeTickCheck)
+            {
+                _resumeTickCheck = -1;
+                Vector3 position;
+                Vector3 velocity;
+                Vector3 slideDir;
+                _bridge.TryGetPlayerPosition(out position);
+                _bridge.TryGetPlayerVelocity(out velocity);
+                _bridge.TryGetSlideDir(out slideDir);
+                bool grounded, sliding, dashing, jumping;
+                _bridge.TryGetMovementState(out grounded, out sliding, out dashing, out jumping);
+                string detail = " pos " + position.ToString("0.###") + " vel " + velocity.ToString("0.###") +
+                                " slideDir " + slideDir.ToString("0.###") + " onGround " + grounded +
+                                " sliding " + sliding + " buttons " + appliedButtons;
+                if (_time.LastTickSteps == 0)
+                    _plugin.LogWarning("Resume tick " + CurrentTick + " ran no physics step (frametime " +
+                                       _time.HostFrametime.ToString("0.000000") + " s, phase " +
+                                       _time.PhysicsAccumulatorSeconds.ToString("0.000000") + " s)" + detail + ".");
+                else
+                    _plugin.LogInfo("Resume tick " + CurrentTick + " ran " + _time.LastTickSteps +
+                                    " physics step(s), phase " +
+                                    _time.PhysicsAccumulatorSeconds.ToString("0.000000") + " s" + detail + ".");
+            }
 
             if (_resumeAfterFirstTick)
             {
@@ -2670,6 +3159,9 @@ namespace UltrakillTAS
                 _script.ResetLookAtResolutions();
             _lookAtWarnedLine = null;
             _lookAtWarnedId = -1;
+            // A restore/rewind replaces the world under the playback cursor; an SSJ sequence
+            // that was mid-slide or mid-wait must not continue from the old state.
+            ResetSsjMacro();
         }
 
         /// <summary>
@@ -3193,10 +3685,11 @@ namespace UltrakillTAS
         }
 
         const TasAutofuncs MovementAutofuncs =
-            TasAutofuncs.AutoJump | TasAutofuncs.AutoSlide | TasAutofuncs.AutoDash | TasAutofuncs.GroundSlam;
+            TasAutofuncs.AutoJump | TasAutofuncs.AutoSlide | TasAutofuncs.AutoSlideSpam |
+            TasAutofuncs.AutoDash | TasAutofuncs.GroundSlam | TasAutofuncs.SSJMacro;
 
         /// <summary>
-        /// The movement autofuncs ('j', 's', 'd', 'g'). They read NewMovement before the game's
+        /// The movement autofuncs ('j', 's', 'S', 'd', 'g', 'm'). They read NewMovement before the game's
         /// Update (this runs in the plugin's early Update, after the frame's physics) and only add
         /// or remove presses on the injected input; the script's held buttons (_lastButtons) do
         /// not change. InputPatcher stamps a press only on the first tick of a held run, so the
@@ -3207,6 +3700,14 @@ namespace UltrakillTAS
         TasButtons ApplyMovementAutofuncs(TasButtons buttons, TasAutofuncs autofuncs)
         {
             _autofuncRepeat = TasButtons.None;
+            // 'S' resets whenever this framebulk does not ask for spam autoslide, so the next
+            // spam line starts with a fresh Slide press.
+            if ((autofuncs & TasAutofuncs.AutoSlideSpam) == 0)
+                _spamAutoslideOn = true;
+            // The one-tick engage belongs to both autoslide forms; a resume that does not use it
+            // must not leave the flag armed for a later tick.
+            if ((autofuncs & TasAutofuncs.AutoSlideMask) == 0)
+                _forceAutoslideEngage = false;
             if ((autofuncs & MovementAutofuncs) == 0)
                 return buttons;
             bool onGround;
@@ -3219,7 +3720,87 @@ namespace UltrakillTAS
             float boostCharge;
             _bridge.TryGetAutofuncState(out jumpCooldown, out boostCharge);
 
-            if ((autofuncs & TasAutofuncs.AutoJump) != 0 && onGround)
+            // Autofunc 'm' (SSJ macro): the exact slide-stop-jump pattern. The landing tick holds
+            // Slide for one tick, the next tick releases it, and the configured number of blank
+            // ticks follow before Jump. Jumping while Slide is still held would call StopSlide
+            // first and see frame 0, which is a plain jump, so the release frame is what makes the
+            // boost happen at all. The slide starts again on the landing tick, so the pattern
+            // repeats. m/m0 is slide -> blank -> jump (3 ticks); m1 adds one blank (4 ticks); m2
+            // adds two (5 ticks). The optional digit is parsed into TasAutofuncs.SSJMacroVariantMask.
+            bool ssjMacro = (autofuncs & TasAutofuncs.SSJMacro) != 0;
+            int ssjBlankFrames = ssjMacro ? TasInputColumns.SsjMacroBlankFrames(autofuncs) : 0;
+            bool ssjRelease = false;
+            bool ssjHoldSlide = false;
+            if (ssjMacro)
+            {
+                switch (_ssjMacroPhase)
+                {
+                    case SsjMacroPhaseIdle:
+                        if (sliding)
+                        {
+                            // Already sliding: count this as the one slide tick, then release.
+                            _ssjMacroPhase = SsjMacroPhaseSliding;
+                            ssjHoldSlide = true;
+                        }
+                        else if (onGround && !jumpCooldown && !dashing)
+                        {
+                            // Landing tick: exactly one Slide input, then the release frame.
+                            _ssjMacroPhase = SsjMacroPhaseSliding;
+                            ssjHoldSlide = true;
+                        }
+                        break;
+
+                    case SsjMacroPhaseSliding:
+                        if (sliding)
+                        {
+                            // The slide started on the previous tick. Release it for the first
+                            // blank frame; StopSlide starts framesSinceSlide on this tick.
+                            _ssjMacroPhase = SsjMacroPhaseWaiting;
+                            _ssjMacroBlankTicks = 1;
+                            ssjRelease = true;
+                        }
+                        else if (!onGround)
+                        {
+                            // The ground disappeared during the setup; start over on landing.
+                            ResetSsjMacro();
+                        }
+                        else if (!jumpCooldown && !dashing)
+                        {
+                            // The game did not start/keep the slide yet; hold it one more tick.
+                            ssjHoldSlide = true;
+                        }
+                        break;
+
+                    case SsjMacroPhaseWaiting:
+                        if (!onGround)
+                        {
+                            // Do not try an air jump after leaving the floor. The macro starts
+                            // its next sequence on the next landing instead.
+                            ResetSsjMacro();
+                        }
+                        else if (_ssjMacroBlankTicks <= ssjBlankFrames)
+                        {
+                            // One more deliberately blank frame: no Slide and no Jump.
+                            _ssjMacroBlankTicks++;
+                        }
+                        else if (!jumpCooldown)
+                        {
+                            // m0 jumps here, one frame after the release. m1 waits one extra
+                            // blank frame and jumps on recovery frame 2, m2 on frame 3, etc.
+                            buttons |= TasButtons.Jump;
+                            _autofuncRepeat |= TasButtons.Jump;
+                            ResetSsjMacro();
+                        }
+                        break;
+                }
+            }
+            else
+            {
+                ResetSsjMacro();
+            }
+
+            if ((autofuncs & TasAutofuncs.AutoJump) != 0 && onGround &&
+                !(ssjMacro && _ssjMacroPhase != SsjMacroPhaseIdle))
             {
                 // Autofunc 'j' (autojump): presses Jump on every grounded tick, so the jump comes
                 // on the landing tick and is retried each tick a jumpCooldown swallowed it.
@@ -3227,11 +3808,37 @@ namespace UltrakillTAS
                 _autofuncRepeat |= TasButtons.Jump;
             }
 
-            // 's' and 'g' both drive Slide. Each tick decides once whether the autofuncs hold it
-            // (grounded: 's'; airborne: 'g'), so the two never release and re-press it on the
-            // same tick. They only add Slide; a Slide the script holds itself is never removed.
+            // 's', 'S' and 'g' drive Slide. Each tick decides once whether the autofuncs hold it
+            // (grounded: 's' holds / 'S' alternates; airborne: 'g'), so they never release and
+            // re-press it on the same tick. They only add Slide; a Slide the script holds itself
+            // is never removed.
             bool holdSlide = false;
-            if ((autofuncs & TasAutofuncs.AutoSlide) != 0 && onGround)
+            bool spamAutoslide = (autofuncs & TasAutofuncs.AutoSlideSpam) != 0;
+            bool slideEligible = onGround &&
+                !(ssjMacro && _ssjMacroPhase == SsjMacroPhaseWaiting);
+            if (spamAutoslide && slideEligible)
+            {
+                // Autofunc 'S' (spam autoslide): the same grounded/jump/SSJ gate as 's', but
+                // presses Slide only on alternate eligible ticks. The first eligible tick is an
+                // on tick; losing the gate resets the phase, so the next landing starts with a
+                // fresh press rather than an off tick.
+                bool engage = _forceAutoslideEngage;
+                _forceAutoslideEngage = false;
+                bool jumpFires = (buttons & TasButtons.Jump) != 0 && !jumpCooldown;
+                bool canPress = !jumpFires && !ssjRelease &&
+                                (sliding || engage || !jumpCooldown);
+                if (canPress)
+                {
+                    if (_spamAutoslideOn)
+                        holdSlide = true;
+                    _spamAutoslideOn = !_spamAutoslideOn;
+                }
+                else
+                {
+                    _spamAutoslideOn = true;
+                }
+            }
+            else if ((autofuncs & TasAutofuncs.AutoSlide) != 0 && slideEligible)
             {
                 // Autofunc 's' (autoslide): holds Slide on every grounded tick, starting with the
                 // tick the ground check first reads grounded (the landing tick), so StartSlide runs
@@ -3242,10 +3849,15 @@ namespace UltrakillTAS
                 // jump unless one is already running. Jump() stops the slide, and a Slide held on
                 // the jump tick, or on the tick after it while the ground check still reads
                 // grounded, would start a new slide (StartSlide accepts lastJump < 0.06 s).
+                bool engage = _forceAutoslideEngage;
+                if (engage)
+                    _forceAutoslideEngage = false;
                 bool jumpFires = (buttons & TasButtons.Jump) != 0 && !jumpCooldown;
-                if (!jumpFires && (sliding || !jumpCooldown))
+                if (!jumpFires && !ssjRelease && (sliding || engage || !jumpCooldown))
                     holdSlide = true;
             }
+            if (spamAutoslide && !slideEligible)
+                _spamAutoslideOn = true;
             if ((autofuncs & TasAutofuncs.GroundSlam) != 0 && !onGround)
             {
                 // Autofunc 'g' (ground slam): holds Slide on every airborne tick where the game
@@ -3260,7 +3872,9 @@ namespace UltrakillTAS
                 if (_bridge.TryGetSlamReady(out slamReady) && slamReady)
                     holdSlide = true;
             }
-            if (holdSlide)
+            if (ssjRelease)
+                holdSlide = false;
+            if (holdSlide || ssjHoldSlide)
                 buttons |= TasButtons.Slide;
 
             if ((autofuncs & TasAutofuncs.AutoDash) != 0 && !dashing && !sliding && boostCharge >= 100f)
@@ -3277,6 +3891,22 @@ namespace UltrakillTAS
 
         /// <summary>Buttons the movement autofuncs press this tick that must repeat their press edge each tick.</summary>
         TasButtons _autofuncRepeat;
+
+        // SSJ macro sequence: one slide tick, then a release tick and any extra blank ticks, then
+        // the jump. A phase is needed because "sliding" alone cannot distinguish the landing tick
+        // from the wait before a delayed m1/m2 jump.
+        const int SsjMacroPhaseIdle = 0;
+        const int SsjMacroPhaseSliding = 1;
+        const int SsjMacroPhaseWaiting = 2;
+        int _ssjMacroPhase;
+        /// <summary>Blank input frames already emitted in the current sequence (the release tick is 1).</summary>
+        int _ssjMacroBlankTicks;
+
+        void ResetSsjMacro()
+        {
+            _ssjMacroPhase = SsjMacroPhaseIdle;
+            _ssjMacroBlankTicks = 0;
+        }
 
         /// <summary>Whiplash hook range: HookArm gives up a throw whose line is longer than 300 units.</summary>
         const float WhipAssistRange = 300f;
@@ -3573,7 +4203,13 @@ namespace UltrakillTAS
         {
             ResetLookAtState();
             _anglesInitialized = false;
-            _input.ReleaseAll();
+            // Do not ReleaseAll here: the restore has already put the saved held mask back
+            // (SaveStateManager.Timing), and a release on this frame cancels a slide or dash
+            // before the first scripted tick can keep it alive. The next tick replaces the mask
+            // with the script's own buttons.
+            _loadedStateAwaitingPlay = true;
+            _forceAutoslideEngage = true;
+            _spamAutoslideOn = true;
             float pitch;
             float yaw;
             if (_bridge.TryGetCameraAngles(out pitch, out yaw))
@@ -3652,12 +4288,13 @@ namespace UltrakillTAS
         }
 
         /// <summary>
-        /// Runs the record_video / record_video_stop lines that sit directly above the line
-        /// starting at this tick, in script order. They take no ticks, so they fire on the
-        /// first tick of the next line that does.
+        /// Runs the fist / record_video / record_video_stop lines that sit directly above the
+        /// line starting at this tick, in script order. They take no ticks, so they fire on the
+        /// first tick of the next line that does. Returns the last fist target in the run.
         /// </summary>
-        void ExecuteZeroTickMarkers(TickLocation location)
+        TasStartFist ExecuteZeroTickMarkers(TickLocation location)
         {
+            TasStartFist fistTarget = TasStartFist.Unchanged;
             int first = _script.ZeroTickRunStart(location.LineIndex);
             for (int i = first; i < location.LineIndex; i++)
             {
@@ -3671,7 +4308,33 @@ namespace UltrakillTAS
                 {
                     _plugin.Video.Stop("record_video_stop");
                 }
+                else if (marker.Kind == TasFrameKind.Fist && marker.FistTarget != TasStartFist.Unchanged)
+                {
+                    fistTarget = marker.FistTarget;
+                }
             }
+            return fistTarget;
+        }
+
+        /// <summary>
+        /// Applies a "fist &lt;arm&gt;" directive on the tick it fires. It reads the live arm and,
+        /// when the other arm is out, adds the game's normal change-fist action to this injected
+        /// tick only. The press is not stored in _lastButtons: a following special frame must
+        /// release x, not hold it and swap the arm again on the next tick.
+        /// </summary>
+        TasButtons ApplyFistDirective(TasButtons injected, TasButtons scriptButtons, TasStartFist target)
+        {
+            if (target == TasStartFist.Unchanged)
+                return injected;
+            // The framebulk already presses a fist action: that input decides the arm, so do not
+            // add a second change on top of it.
+            if ((scriptButtons & (TasButtons.FistChange | TasButtons.FistFeedbacker |
+                                  TasButtons.FistKnuckleblaster)) != 0)
+                return injected;
+            int current = _bridge.CurrentFistVariant;
+            if (current < 0 || current == (int)target)
+                return injected;
+            return injected | TasButtons.FistChange;
         }
 
         /// <summary>
@@ -4000,6 +4663,8 @@ namespace UltrakillTAS
 
         /// <summary>Checkpoint chosen by Play to resume from, if any.</summary>
         NorefreshEntry _norefreshHit;
+        // Tick whose start is logged for the checkpoint/resume comparison, -1 when idle.
+        int _resumeProbeTick = -1;
 
         /// <summary>Longest real wait a script hold may take before playback pauses instead.</summary>
         const int HoldTimeoutFrames = 1800;

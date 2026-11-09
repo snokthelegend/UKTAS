@@ -9,9 +9,9 @@ namespace UltrakillTAS
     ///
     /// The core capture keeps the AudioSources that hang off the player and enemies. Level
     /// ambience, boss music and one-shot world sounds live elsewhere: their playback position,
-    /// pitch and volume, plus MusicManager's own playback bookkeeping, decide which bar of a
-    /// track is playing after a load. Only sources that were actually playing are stored, so a
-    /// level with hundreds of dormant emitters stays cheap.
+    /// pitch, volume, mixer routing and filter state, plus MusicManager's own playback
+    /// bookkeeping, decide what is heard after a load. Full saves keep every world source;
+    /// rolling history still limits the walk to playing sources.
     /// </summary>
     public sealed partial class SaveStateManager
     {
@@ -58,18 +58,13 @@ namespace UltrakillTAS
             for (int i = 0; i < sources.Length && audio.Sources.Count < MaxWorldAudio; i++)
             {
                 AudioSource source = sources[i] as AudioSource;
-                if (source == null || source.clip == null || !source.isPlaying)
+                if (source == null || source.clip == null || (_lightCapture && !source.isPlaying))
                     continue;
                 if (IsTemplateClone(source.gameObject))
                     continue;
-                audio.Sources.Add(new AudioSnapshot
-                {
-                    Source = source,
-                    Playing = true,
-                    Time = source.time,
-                    Pitch = source.pitch,
-                    Volume = source.volume
-                });
+                AudioSnapshot snapshot = CaptureAudioSource(source);
+                if (snapshot != null)
+                    audio.Sources.Add(snapshot);
             }
             if (audio.Sources.Count >= MaxWorldAudio)
                 NoteCap("playing world audio sources", MaxWorldAudio);

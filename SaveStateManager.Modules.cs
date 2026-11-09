@@ -60,6 +60,8 @@ namespace UltrakillTAS
         partial void RestoreAudio(Savestate state, ref int restored, ref int missing);
         partial void CaptureMisc(Savestate state);
         partial void RestoreMisc(Savestate state, ref int restored, ref int missing);
+        partial void CaptureCompleteness(Savestate state);
+        partial void RestoreCompleteness(Savestate state, ref int restored, ref int missing);
 
         /// <summary>First step of Restore: stop coroutines/Invokes before any value is written.</summary>
         partial void PreRestore(Savestate state);
@@ -111,6 +113,8 @@ namespace UltrakillTAS
             catch (Exception ex) { AddWarning(state, "audio", ex); }
             try { CaptureMisc(state); }
             catch (Exception ex) { AddWarning(state, "misc", ex); }
+            try { CaptureCompleteness(state); }
+            catch (Exception ex) { AddWarning(state, "completeness", ex); }
         }
 
         void RestoreModules(Savestate state, ref int restored, ref int missing)
@@ -139,6 +143,8 @@ namespace UltrakillTAS
             catch (Exception ex) { _plugin.LogWarning("Savestate audio restore skipped: " + ex.Message); }
             try { RestoreMisc(state, ref restored, ref missing); }
             catch (Exception ex) { _plugin.LogWarning("Savestate misc restore skipped: " + ex.Message); }
+            try { RestoreCompleteness(state, ref restored, ref missing); }
+            catch (Exception ex) { _plugin.LogWarning("Savestate completeness restore skipped: " + ex.Message); }
         }
 
         void RunPreRestore(Savestate state)

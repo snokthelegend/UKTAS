@@ -89,7 +89,31 @@ namespace UltrakillTAS
                                    ". Their contents cannot be restored; reload the level first.");
             }
             if (extra.Count > 0)
+            {
+                // A scene loaded after the save is extra timeline content. Unload it when the
+                // cleanup option is on; Unity only offers an asynchronous unload, so log the
+                // operation and let the next frame complete it rather than leaving the scene
+                // silently active forever.
+                if (_plugin.SavestateCleanupSpawned != null && _plugin.SavestateCleanupSpawned.Value)
+                {
+                    for (int i = 0; i < extra.Count; i++)
+                    {
+                        Scene scene = SceneManager.GetSceneByName(extra[i]);
+                        if (!scene.IsValid() || !scene.isLoaded || scene == SceneManager.GetActiveScene())
+                            continue;
+                        try
+                        {
+                            SceneManager.UnloadSceneAsync(scene);
+                            _plugin.LogInfo("Savestate unloading additive scene '" + extra[i] + "' loaded after the save.");
+                        }
+                        catch (Exception ex)
+                        {
+                            _plugin.LogWarning("Savestate could not unload additive scene '" + extra[i] + "': " + ex.Message);
+                        }
+                    }
+                }
                 _plugin.LogInfo("Scene(s) loaded since the save, not part of the state: " + string.Join(", ", extra.ToArray()) + ".");
+            }
         }
     }
 }

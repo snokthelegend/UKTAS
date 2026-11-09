@@ -2,6 +2,8 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Reflection;
+using System.Runtime.CompilerServices;
+using HarmonyLib;
 using UnityEngine;
 
 namespace UltrakillTAS
@@ -34,6 +36,15 @@ namespace UltrakillTAS
             public FieldInfo Field;
             public string Method;
             public bool Running;
+            public List<FieldState> EnumeratorFields;
+        }
+
+        sealed class TrackedCoroutineState
+        {
+            public Component Owner;
+            public string Method;
+            public Coroutine Handle;
+            public List<FieldState> EnumeratorFields;
         }
 
         static readonly Dictionary<Type, FieldInfo[]> CoroutineFieldCache = new Dictionary<Type, FieldInfo[]>();
@@ -44,6 +55,8 @@ namespace UltrakillTAS
         {
             List<Component> components = CollectCoroutineComponents(state);
             List<CoroutineFieldState> fields = new List<CoroutineFieldState>(components.Count);
+            List<TrackedCoroutineState> tracked = new List<TrackedCoroutineState>(16);
+            HashSet<Coroutine> seenHandles = new HashSet<Coroutine>();
             for (int i = 0; i < components.Count; i++)
             {
                 Component component = components[i];
@@ -63,8 +76,33 @@ namespace UltrakillTAS
                             Owner = component,
                             Field = field,
                             Method = GuessCoroutineMethod(component.GetType(), field.Name),
-                            Running = current != null
+                            Running = current != null,
+                            EnumeratorFields = current != null
+                                ? CaptureFields(CoroutineTracker.GetEnumerator(current), FieldCap)
+                                : null
                         });
+                        if (current != null)
+                            seenHandles.Add(current);
+                    }
+
+                    MonoBehaviour behaviour = component as MonoBehaviour;
+                    if (behaviour != null)
+                    {
+                        List<CoroutineTracker.Entry> active = CoroutineTracker.GetActive(behaviour);
+                        for (int a = 0; a < active.Count; a++)
+                        {
+                            CoroutineTracker.Entry entry = active[a];
+                            if (entry == null || entry.Handle == null ||
+                                !seenHandles.Add(entry.Handle))
+                                continue;
+                            tracked.Add(new TrackedCoroutineState
+                            {
+                                Owner = component,
+                                Method = entry.Method,
+                                Handle = entry.Handle,
+                                EnumeratorFields = CaptureFields(entry.Enumerator, FieldCap)
+                            });
+                        }
                     }
                 }
                 catch
@@ -72,14 +110,16 @@ namespace UltrakillTAS
                 }
             }
             SetExt(state, "Coroutines", fields);
+            SetExt(state, "CoroutinesTracked", tracked);
         }
 
         partial void RestoreCoroutines(Savestate state, ref int restored, ref int missing)
         {
             List<CoroutineFieldState> fields = GetExt<List<CoroutineFieldState>>(state, "Coroutines");
-            if (fields == null)
+            List<TrackedCoroutineState> tracked = GetExt<List<TrackedCoroutineState>>(state, "CoroutinesTracked");
+            if (fields == null && tracked == null)
                 return;
-            for (int i = 0; i < fields.Count; i++)
+            if (fields != null) for (int i = 0; i < fields.Count; i++)
             {
                 CoroutineFieldState field = fields[i];
                 if (field == null || field.Owner == null)
@@ -93,17 +133,27 @@ namespace UltrakillTAS
                 if (field.Running)
                     restored++;
             }
+            if (tracked != null)
+            {
+                for (int i = 0; i < tracked.Count; i++)
+                {
+                    TrackedCoroutineState entry = tracked[i];
+                    if (entry != null && entry.Owner != null && Resolve(entry.Owner) != null)
+                        restored++;
+                }
+            }
         }
 
         /// <summary>First restore step: every stored handle is dropped, running or not.</summary>
         partial void PreRestore(Savestate state)
         {
             List<CoroutineFieldState> fields = GetExt<List<CoroutineFieldState>>(state, "Coroutines");
-            if (fields == null)
+            List<TrackedCoroutineState> tracked = GetExt<List<TrackedCoroutineState>>(state, "CoroutinesTracked");
+            if (fields == null && tracked == null)
                 return;
 
             int stopped = 0;
-            for (int i = 0; i < fields.Count; i++)
+            if (fields != null) for (int i = 0; i < fields.Count; i++)
             {
                 CoroutineFieldState entry = fields[i];
                 if (entry == null)
@@ -126,6 +176,26 @@ namespace UltrakillTAS
                 {
                 }
             }
+            if (tracked != null)
+            {
+                for (int i = 0; i < tracked.Count; i++)
+                {
+                    TrackedCoroutineState entry = tracked[i];
+                    if (entry == null || entry.Handle == null)
+                        continue;
+                    MonoBehaviour behaviour = Resolve(entry.Owner) as MonoBehaviour;
+                    if (behaviour == null)
+                        continue;
+                    try
+                    {
+                        behaviour.StopCoroutine(entry.Handle);
+                        stopped++;
+                    }
+                    catch
+                    {
+                    }
+                }
+            }
             if (stopped > 0)
                 _plugin.LogInfo("Savestate stopped " + stopped + " coroutine(s) from the discarded timeline.");
         }
@@ -138,12 +208,13 @@ namespace UltrakillTAS
             ApplySavedPhysicsPhase(state);
 
             List<CoroutineFieldState> fields = GetExt<List<CoroutineFieldState>>(state, "Coroutines");
-            if (fields == null)
+            List<TrackedCoroutineState> tracked = GetExt<List<TrackedCoroutineState>>(state, "CoroutinesTracked");
+            if (fields == null && tracked == null)
                 return;
 
             int restarted = 0;
             int skipped = 0;
-            for (int i = 0; i < fields.Count; i++)
+            if (fields != null) for (int i = 0; i < fields.Count; i++)
             {
                 CoroutineFieldState entry = fields[i];
                 if (entry == null || !entry.Running)
@@ -165,7 +236,7 @@ namespace UltrakillTAS
                     Coroutine current = entry.Field.GetValue(owner) as Coroutine;
                     if (current != null)
                         continue;
-                    Coroutine started = StartCoroutineByName(behaviour, entry.Method);
+                    Coroutine started = StartCoroutineByName(behaviour, entry.Method, entry.EnumeratorFields);
                     if (started != null)
                     {
                         entry.Field.SetValue(owner, started);
@@ -177,12 +248,38 @@ namespace UltrakillTAS
                     skipped++;
                 }
             }
+            if (tracked != null)
+            {
+                for (int i = 0; i < tracked.Count; i++)
+                {
+                    TrackedCoroutineState entry = tracked[i];
+                    if (entry == null || string.IsNullOrEmpty(entry.Method))
+                        continue;
+                    MonoBehaviour behaviour = Resolve(entry.Owner) as MonoBehaviour;
+                    if (behaviour == null || !behaviour.gameObject.activeInHierarchy || !behaviour.enabled)
+                    {
+                        skipped++;
+                        continue;
+                    }
+                    try
+                    {
+                        Coroutine started = StartCoroutineByName(behaviour, entry.Method, entry.EnumeratorFields);
+                        if (started != null)
+                            restarted++;
+                    }
+                    catch
+                    {
+                        skipped++;
+                    }
+                }
+            }
             if (restarted > 0)
                 _plugin.LogInfo("Savestate re-armed " + restarted + " coroutine(s)" +
                                 (skipped > 0 ? ", " + skipped + " could not be restarted." : "."));
         }
 
-        static Coroutine StartCoroutineByName(MonoBehaviour behaviour, string methodName)
+        static Coroutine StartCoroutineByName(MonoBehaviour behaviour, string methodName,
+                                               List<FieldState> enumeratorFields)
         {
             if (behaviour == null || string.IsNullOrEmpty(methodName))
                 return null;
@@ -192,6 +289,11 @@ namespace UltrakillTAS
             IEnumerator routine = method.Invoke(behaviour, null) as IEnumerator;
             if (routine == null)
                 return null;
+            // The iterator generated by the compiler is a normal state machine: its state,
+            // locals and current yield object are ordinary fields. Copying them onto a fresh
+            // iterators resumes after the saved yield instead of replaying the whole routine.
+            if (enumeratorFields != null)
+                ApplyFields(routine, enumeratorFields);
             return behaviour.StartCoroutine(routine);
         }
 
@@ -385,6 +487,131 @@ namespace UltrakillTAS
                 return;
             if (!into.Contains(component))
                 into.Add(component);
+        }
+    }
+
+    /// <summary>
+    /// Unity's Coroutine object exposes no enumerator. A postfix on StartCoroutine keeps the
+    /// association for the handles that savestates already capture, so the iterator fields can
+    /// be saved and resumed. The table is weak: completed handles never pin game objects.
+    /// </summary>
+    internal static class CoroutineTracker
+    {
+        internal sealed class Entry
+        {
+            public MonoBehaviour Owner;
+            public Coroutine Handle;
+            public IEnumerator Enumerator;
+            public string Method;
+        }
+
+        static readonly ConditionalWeakTable<Coroutine, IEnumerator> Active =
+            new ConditionalWeakTable<Coroutine, IEnumerator>();
+        static readonly List<Entry> Tracked = new List<Entry>(128);
+        static HarmonyLib.Harmony _harmony;
+
+        public static void Install()
+        {
+            if (_harmony != null)
+                return;
+            try
+            {
+                MethodInfo start = typeof(MonoBehaviour).GetMethod("StartCoroutine",
+                    BindingFlags.Instance | BindingFlags.Public, null,
+                    new[] { typeof(IEnumerator) }, null);
+                if (start == null)
+                    return;
+                _harmony = new HarmonyLib.Harmony("com.tas.ultrakill.coroutines");
+                _harmony.Patch(start, postfix: new HarmonyMethod(typeof(CoroutineTracker)
+                    .GetMethod("Postfix", BindingFlags.Static | BindingFlags.NonPublic)));
+            }
+            catch
+            {
+                _harmony = null;
+            }
+        }
+
+        public static IEnumerator GetEnumerator(Coroutine coroutine)
+        {
+            if (coroutine == null)
+                return null;
+            IEnumerator routine;
+            return Active.TryGetValue(coroutine, out routine) ? routine : null;
+        }
+
+        public static List<Entry> GetActive(MonoBehaviour owner)
+        {
+            List<Entry> result = new List<Entry>(4);
+            if (owner == null)
+                return result;
+            if (Tracked.Count > 8192)
+                Prune();
+            for (int i = 0; i < Tracked.Count; i++)
+            {
+                Entry entry = Tracked[i];
+                if (entry == null || !ReferenceEquals(entry.Owner, owner) || entry.Handle == null)
+                    continue;
+                if (IteratorState(entry.Enumerator) <= 0)
+                    continue;
+                result.Add(entry);
+            }
+            return result;
+        }
+
+        static void Postfix(MonoBehaviour __instance, IEnumerator __0, Coroutine __result)
+        {
+            if (__instance == null || __0 == null || __result == null)
+                return;
+            Active.Remove(__result);
+            Active.Add(__result, __0);
+            Tracked.Add(new Entry
+            {
+                Owner = __instance,
+                Handle = __result,
+                Enumerator = __0,
+                Method = MethodFromIterator(__0.GetType())
+            });
+            if (Tracked.Count > 8192)
+                Prune();
+        }
+
+        static void Prune()
+        {
+            for (int i = Tracked.Count - 1; i >= 0; i--)
+            {
+                Entry entry = Tracked[i];
+                if (entry == null || entry.Owner == null || entry.Handle == null ||
+                    IteratorState(entry.Enumerator) <= 0)
+                    Tracked.RemoveAt(i);
+            }
+        }
+
+        static int IteratorState(IEnumerator enumerator)
+        {
+            if (enumerator == null)
+                return -1;
+            try
+            {
+                FieldInfo state = enumerator.GetType().GetField("<>1__state",
+                    BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                return state != null ? (int)state.GetValue(enumerator) : 1;
+            }
+            catch
+            {
+                return 1;
+            }
+        }
+
+        static string MethodFromIterator(Type type)
+        {
+            if (type == null)
+                return null;
+            string name = type.Name;
+            int open = name.IndexOf('<');
+            int close = name.IndexOf('>', open + 1);
+            if (open >= 0 && close > open + 1)
+                return name.Substring(open + 1, close - open - 1);
+            return null;
         }
     }
 }

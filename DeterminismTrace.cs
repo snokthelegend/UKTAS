@@ -8,10 +8,17 @@ using UnityEngine;
 namespace UltrakillTAS
 {
     /// <summary>
-    /// Per-tick dump of the player and every moving rigidbody, started when a run reaches
-    /// tick 0. Two runs of the same script should write identical rows; the first row that
-    /// differs is the first tick where the game's physics diverged. Each row is the state
-    /// at the start of the tick, so it shows the result of the previous tick's physics.
+    /// Per-tick dump of the player and every moving rigidbody, plus two explicit marks that
+    /// answer where a norefresh resume stops matching continuous playback:
+    ///
+    ///   checkpoint : written by the run that caches the checkpoint, at the tick it resumes at
+    ///                (start of the tick, before its commands run).
+    ///   restored   : written right after RestoreNorefresh put the checkpoint back.
+    ///
+    /// Both rows hold position, velocity, camera angles, the fixed-step phase and a hash of
+    /// UnityEngine.Random.state, so the two files can be diffed on the first resumed tick
+    /// instead of waiting for the divergence to reach the player. <see cref="Restored"/>
+    /// additionally compares the pair in memory and reports it.
     /// </summary>
     public sealed class DeterminismTrace
     {
@@ -27,11 +34,111 @@ namespace UltrakillTAS
 
         public string FilePath { get; private set; }
 
-        public void Row(int tick, GameBridge bridge)
+        /// <summary>The tick of the checkpoint mark currently held for comparison.</summary>
+        struct StateSample
+        {
+            public int Tick;
+            public Vector3 Position;
+            public Vector3 Velocity;
+            public float Pitch;
+            public float Yaw;
+            public double Phase;
+            public double LivePhase;
+            public bool Grounded;
+            public ulong Rng;
+            public bool Valid;
+        }
+
+        StateSample _checkpoint;
+
+        /// <summary>Result of the last <see cref="Restored"/> comparison.</summary>
+        public bool LastRestoreMatched { get; private set; }
+
+        /// <summary>One ordinary per-tick row (start of the tick, before its input).</summary>
+        public void Row(int tick, GameBridge bridge, double phase, int steps, float pitch, float yaw, ulong rng, bool grounded)
         {
             if (tick == 0)
                 Begin();
-            if (_writer == null || _rows >= MaxRows)
+            EnsureStarted();
+            Write("tick", tick, bridge, phase, steps, pitch, yaw, rng, grounded);
+        }
+
+        /// <summary>The continuous-playback half of the resume comparison.</summary>
+        public void Checkpoint(int tick, GameBridge bridge, double phase, int steps, float pitch, float yaw, ulong rng, bool grounded)
+        {
+            if (tick == 0)
+                Begin();
+            EnsureStarted();
+            _checkpoint = Sample(tick, bridge, phase, pitch, yaw, rng, grounded);
+            Write("checkpoint", tick, bridge, phase, steps, pitch, yaw, rng, grounded);
+        }
+
+        /// <summary>
+        /// The resume half. Returns null when nothing could be compared, otherwise a one-line
+        /// verdict with the deltas from the checkpoint mark at the same tick.
+        /// </summary>
+        public string Restored(int tick, GameBridge bridge, double phase, int steps, float pitch, float yaw, ulong rng, bool grounded)
+        {
+            if (tick == 0)
+                Begin();
+            EnsureStarted();
+            StateSample restored = Sample(tick, bridge, phase, pitch, yaw, rng, grounded);
+            Write("restored", tick, bridge, phase, steps, pitch, yaw, rng, grounded);
+
+            if (!_checkpoint.Valid || _checkpoint.Tick != tick)
+            {
+                LastRestoreMatched = false;
+                return "resumed at tick " + tick + ", but no checkpoint row for that tick was recorded " +
+                       "during the first run (the trace was off then, or the run restarted)";
+            }
+
+            double position = MaxDelta(_checkpoint.Position, restored.Position);
+            double velocity = MaxDelta(_checkpoint.Velocity, restored.Velocity);
+            double angles = Math.Max(Math.Abs(_checkpoint.Pitch - restored.Pitch),
+                                     Math.Abs(_checkpoint.Yaw - restored.Yaw));
+            double modelDelta = Math.Abs(_checkpoint.Phase - restored.Phase);
+            // The live remainder is what Unity's fixed loop will actually spend next; the model
+            // value is only the savestate's copy of it. A mismatch here means the alignment did
+            // not land and the resumed tick steps physics on a different boundary.
+            double liveDelta = Math.Abs(_checkpoint.LivePhase - restored.LivePhase);
+            bool rngSame = _checkpoint.Rng == restored.Rng && restored.Rng != 0UL;
+            // A ground-contact flip across the resume is one of the ways a player gains height.
+            bool groundSame = _checkpoint.Grounded == restored.Grounded;
+            LastRestoreMatched = position < 1e-5 && velocity < 1e-4 && angles < 1e-4 &&
+                                 modelDelta < 1e-7 && liveDelta < 1e-5 && rngSame && groundSame;
+            return "tick " + tick + " restored: pos d" + F(position) + " vel d" + F(velocity) +
+                   " camera d" + F(angles) + " model phase d" + F(modelDelta) +
+                   "s live phase d" + F(liveDelta) + "s " +
+                   (rngSame ? "rng same" : "rng DIFFERENT") +
+                   (groundSame ? " ground same" : " GROUND DIFFERENT");
+        }
+
+        static StateSample Sample(int tick, GameBridge bridge, double phase, float pitch, float yaw, ulong rng, bool grounded)
+        {
+            StateSample sample = new StateSample
+            {
+                Tick = tick,
+                Pitch = pitch,
+                Yaw = yaw,
+                Phase = phase,
+                LivePhase = LivePhaseNow(),
+                Grounded = grounded,
+                Rng = rng
+            };
+            if (bridge != null)
+            {
+                bridge.TryGetPlayerPosition(out sample.Position);
+                bridge.TryGetPlayerVelocity(out sample.Velocity);
+            }
+            sample.Valid = true;
+            return sample;
+        }
+
+        void Write(string kind, int tick, GameBridge bridge, double phase, int steps, float pitch, float yaw, ulong rng, bool grounded)
+        {
+            if (_writer == null)
+                return;
+            if (_rows >= MaxRows)
                 return;
 
             Vector3 position;
@@ -71,16 +178,24 @@ namespace UltrakillTAS
             int enemyCount;
             ulong enemySum = EnemyChecksum(bridge, out enemyCount);
 
-            StringBuilder sb = new StringBuilder(256);
+            StringBuilder sb = new StringBuilder(320);
             sb.Append(tick.ToString(Inv)).Append(';');
+            sb.Append(kind).Append(';');
             sb.Append(Time.time.ToString("R", Inv)).Append(';');
             sb.Append(Time.fixedTime.ToString("R", Inv)).Append(';');
+            sb.Append(phase.ToString("R", Inv)).Append(';');
+            sb.Append(LivePhaseNow().ToString("R", Inv)).Append(';');
+            sb.Append(steps.ToString(Inv)).Append(';');
+            sb.Append(grounded ? "1" : "0").Append(';');
+            sb.Append(pitch.ToString("R", Inv)).Append(';');
+            sb.Append(yaw.ToString("R", Inv)).Append(';');
             sb.Append(Vec(position)).Append(';');
             sb.Append(Vec(velocity)).Append(';');
             sb.Append(count.ToString(Inv)).Append(';');
             sb.Append(sum.ToString("X16", Inv)).Append(';');
             sb.Append(enemyCount.ToString(Inv)).Append(';');
             sb.Append(enemySum.ToString("X16", Inv)).Append(';');
+            sb.Append(rng.ToString("X16", Inv)).Append(';');
             for (int i = 0; i < moving.Count && i < MaxBodies; i++)
             {
                 if (i > 0)
@@ -152,6 +267,16 @@ namespace UltrakillTAS
             return sum;
         }
 
+        /// <summary>
+        /// A resumed run starts at a nonzero tick: open the file on its first row so the rest of
+        /// it is traced too, instead of waiting for a tick 0 that never comes.
+        /// </summary>
+        void EnsureStarted()
+        {
+            if (_writer == null)
+                Begin();
+        }
+
         void Begin()
         {
             Close();
@@ -162,13 +287,15 @@ namespace UltrakillTAS
                 // Buffered: a flush per tick put a disk write on every simulated frame.
                 // Rows are flushed every FlushEveryRows and when the trace closes.
                 _writer = new StreamWriter(FilePath, false, new UTF8Encoding(false), 1 << 16) { AutoFlush = false };
-                _writer.WriteLine("tick;time;fixedTime;playerPos;playerVel;rigidbodies;checksum;enemies;enemyChecksum;movingBodies");
+                _writer.WriteLine("tick;kind;time;fixedTime;phase;livePhase;steps;grounded;pitch;yaw;playerPos;playerVel;" +
+                                  "rigidbodies;checksum;enemies;enemyChecksum;rng;movingBodies");
                 _rows = 0;
             }
             catch
             {
                 _writer = null;
             }
+            _checkpoint = default(StateSample);
         }
 
         public void Close()
@@ -178,6 +305,31 @@ namespace UltrakillTAS
             try { _writer.Dispose(); }
             catch { }
             _writer = null;
+        }
+
+        /// <summary>
+        /// Unity's own fixed-step remainder (Time.time - Time.fixedTime). This is the phase the
+        /// next frame's fixed loop will spend, and the thing a load cannot write directly.
+        /// </summary>
+        static double LivePhaseNow()
+        {
+            double native = Time.fixedDeltaTime;
+            if (native <= 0.0)
+                return 0.0;
+            double remainder = Time.timeAsDouble - Time.fixedTimeAsDouble;
+            if (double.IsNaN(remainder) || remainder < 0.0)
+                return 0.0;
+            return remainder >= native ? remainder % native : remainder;
+        }
+
+        static double MaxDelta(Vector3 a, Vector3 b)
+        {
+            return Math.Max(Math.Abs(a.x - b.x), Math.Max(Math.Abs(a.y - b.y), Math.Abs(a.z - b.z)));
+        }
+
+        static string F(double value)
+        {
+            return value.ToString("0.######", Inv);
         }
 
         static ulong Bits(float value)

@@ -174,7 +174,11 @@ namespace UltrakillTAS
         {
             if (component == null)
                 return null;
-            ComponentSnapshot snapshot = new ComponentSnapshot { Component = component };
+            ComponentSnapshot snapshot = new ComponentSnapshot
+            {
+                Component = component,
+                TypeName = component.GetType().Name
+            };
             Behaviour behaviour = component as Behaviour;
             if (behaviour != null)
             {
@@ -301,7 +305,7 @@ namespace UltrakillTAS
             return result;
         }
 
-        static void CaptureParticles(GameObject root, int max, List<ParticleSnapshot> into)
+        void CaptureParticles(GameObject root, int max, List<ParticleSnapshot> into, bool full)
         {
             if (root == null || into == null)
                 return;
@@ -313,14 +317,81 @@ namespace UltrakillTAS
                 ParticleSystem system = systems[i];
                 if (system == null)
                     continue;
-                into.Add(new ParticleSnapshot
-                {
-                    System = system,
-                    Playing = system.isPlaying,
-                    Paused = system.isPaused,
-                    Time = system.time
-                });
+                ParticleSnapshot snapshot = CaptureParticle(system, full);
+                if (snapshot != null)
+                    into.Add(snapshot);
             }
+        }
+
+        /// <summary>
+        /// A system's live particles plus the modules that decide what they do next. The
+        /// buffer is exact for a slot save; a light rolling-history capture keeps only the
+        /// seed/time path because copying tens of thousands of vertices every tick is not
+        /// worth it. The buffer budget is per whole state, so many emitters cannot exhaust
+        /// memory; once it is spent the older seed/resimulate path is used instead.
+        /// </summary>
+        ParticleSnapshot CaptureParticle(ParticleSystem system, bool full)
+        {
+            if (system == null)
+                return null;
+            ParticleSnapshot snapshot = new ParticleSnapshot
+            {
+                System = system,
+                Playing = system.isPlaying,
+                Paused = system.isPaused,
+                Time = system.time,
+                RandomSeed = system.randomSeed,
+                UseAutoRandomSeed = system.useAutoRandomSeed,
+                Emitting = system.isEmitting,
+                EmissionEnabled = system.emission.enabled,
+                SimulationSpeed = system.main.simulationSpeed
+            };
+            try
+            {
+                snapshot.Main = system.main;
+                snapshot.Emission = system.emission;
+                snapshot.Shape = system.shape;
+                snapshot.VelocityOverLifetime = system.velocityOverLifetime;
+                snapshot.Noise = system.noise;
+                snapshot.Collision = system.collision;
+                snapshot.Trails = system.trails;
+                snapshot.SubEmitters = system.subEmitters;
+                snapshot.TextureSheetAnimation = system.textureSheetAnimation;
+                snapshot.ColorOverLifetime = system.colorOverLifetime;
+                snapshot.SizeOverLifetime = system.sizeOverLifetime;
+                snapshot.RotationOverLifetime = system.rotationOverLifetime;
+                snapshot.ForceOverLifetime = system.forceOverLifetime;
+                snapshot.LimitVelocity = system.limitVelocityOverLifetime;
+                snapshot.InheritVelocity = system.inheritVelocity;
+                snapshot.HasModules = true;
+            }
+            catch
+            {
+            }
+            if (!full || _particleBufferBudget <= 0)
+                return snapshot;
+
+            int wanted = system.particleCount;
+            if (wanted <= 0)
+            {
+                snapshot.FullState = true;
+                return snapshot;
+            }
+            int count = Math.Min(wanted, MaxParticleBufferPerSystem);
+            count = Math.Min(count, _particleBufferBudget);
+            if (count <= 0)
+                return snapshot;
+            ParticleSystem.Particle[] buffer = new ParticleSystem.Particle[count];
+            int got = system.GetParticles(buffer);
+            if (got < buffer.Length)
+                Array.Resize(ref buffer, got);
+            snapshot.FullState = true;
+            snapshot.Buffer = buffer;
+            snapshot.BufferCount = got;
+            _particleBufferBudget -= got;
+            if (wanted > got)
+                NoteCap("live particles per system", MaxParticleBufferPerSystem);
+            return snapshot;
         }
 
         static void RestoreParticles(List<ParticleSnapshot> snapshots)
@@ -331,14 +402,46 @@ namespace UltrakillTAS
             {
                 ParticleSnapshot snapshot = snapshots[i];
                 ParticleSystem system = snapshot.System;
-                if (system == null || !system.gameObject.activeInHierarchy)
+                if (system == null)
                     continue;
                 try
                 {
+                    // Module configuration first: a stopped system still needs its seed,
+                    // bursts, shape and emission setup for the next time the game plays it.
+                    RestoreParticleModules(system, snapshot);
                     if (!snapshot.Playing)
                     {
                         if (system.isPlaying || system.particleCount > 0)
                             system.Stop(false, ParticleSystemStopBehavior.StopEmittingAndClear);
+                        system.useAutoRandomSeed = snapshot.UseAutoRandomSeed;
+                        if (!snapshot.UseAutoRandomSeed)
+                            system.randomSeed = snapshot.RandomSeed;
+                        continue;
+                    }
+                    // Exact path: put the saved modules and every live particle back. This
+                    // preserves age, velocity, colour/size curves, sub-emitter spawn state and
+                    // the RNG sequence instead of approximating by re-simulating from a seed.
+                    if (snapshot.FullState)
+                    {
+                        ParticleSystem.MainModule main = system.main;
+                        main.simulationSpeed = snapshot.SimulationSpeed;
+                        ParticleSystem.EmissionModule emission = system.emission;
+                        emission.enabled = snapshot.EmissionEnabled;
+                        system.useAutoRandomSeed = snapshot.UseAutoRandomSeed;
+                        if (!snapshot.UseAutoRandomSeed)
+                            system.randomSeed = snapshot.RandomSeed;
+
+                        system.Stop(false, ParticleSystemStopBehavior.StopEmittingAndClear);
+                        system.Play(false);
+                        if (snapshot.Buffer != null && snapshot.BufferCount > 0)
+                            system.SetParticles(snapshot.Buffer, snapshot.BufferCount);
+                        system.time = snapshot.Time;
+                        // StopEmitting leaves existing particles alive; it is how a burst that
+                        // had finished emitting but still had live particles is represented.
+                        if (!snapshot.Emitting)
+                            system.Stop(false, ParticleSystemStopBehavior.StopEmitting);
+                        if (snapshot.Paused)
+                            system.Pause(false);
                         continue;
                     }
                     // Particles that were mid-flight are rebuilt by simulating to the saved
@@ -353,6 +456,97 @@ namespace UltrakillTAS
                 catch
                 {
                 }
+            }
+        }
+
+        /// <summary>
+        /// Particle module structs are read-only properties, but their individual properties
+        /// write through to the native system. Copy every writable public property from the
+        /// saved module box into the live module box; unsupported/indexed/native properties
+        /// are skipped individually so one bad module cannot lose the whole emitter.
+        /// </summary>
+        static void RestoreParticleModules(ParticleSystem system, ParticleSnapshot snapshot)
+        {
+            if (system == null || snapshot == null || !snapshot.HasModules ||
+                !ReferenceEquals(system, snapshot.System))
+                return;
+            try { CopyParticleModule(snapshot.Main, system.main); } catch { }
+            try { CopyParticleModule(snapshot.Emission, system.emission); } catch { }
+            try { CopyParticleModule(snapshot.Shape, system.shape); } catch { }
+            try { CopyParticleModule(snapshot.VelocityOverLifetime, system.velocityOverLifetime); } catch { }
+            try { CopyParticleModule(snapshot.Noise, system.noise); } catch { }
+            try { CopyParticleModule(snapshot.Collision, system.collision); } catch { }
+            try { CopyParticleModule(snapshot.Trails, system.trails); } catch { }
+            try { CopyParticleModule(snapshot.SubEmitters, system.subEmitters); } catch { }
+            try { CopyParticleModule(snapshot.TextureSheetAnimation, system.textureSheetAnimation); } catch { }
+            try { CopyParticleModule(snapshot.ColorOverLifetime, system.colorOverLifetime); } catch { }
+            try { CopyParticleModule(snapshot.SizeOverLifetime, system.sizeOverLifetime); } catch { }
+            try { CopyParticleModule(snapshot.RotationOverLifetime, system.rotationOverLifetime); } catch { }
+            try { CopyParticleModule(snapshot.ForceOverLifetime, system.forceOverLifetime); } catch { }
+            try { CopyParticleModule(snapshot.LimitVelocity, system.limitVelocityOverLifetime); } catch { }
+            try { CopyParticleModule(snapshot.InheritVelocity, system.inheritVelocity); } catch { }
+        }
+
+        static void CopyParticleModule(object saved, object live)
+        {
+            if (saved == null || live == null)
+                return;
+            PropertyInfo[] properties = saved.GetType().GetProperties(
+                BindingFlags.Instance | BindingFlags.Public);
+            for (int i = 0; i < properties.Length; i++)
+            {
+                PropertyInfo property = properties[i];
+                if (!property.CanRead || !property.CanWrite || property.GetIndexParameters().Length != 0)
+                    continue;
+                try
+                {
+                    object value = property.GetValue(saved, null);
+                    if (value is UnityEngine.Object unity && !unity)
+                        continue;
+                    property.SetValue(live, value, null);
+                }
+                catch
+                {
+                }
+            }
+        }
+
+        static AudioSnapshot CaptureAudioSource(AudioSource source)
+        {
+            if (source == null)
+                return null;
+            try
+            {
+                return new AudioSnapshot
+                {
+                    Source = source,
+                    Playing = source.isPlaying,
+                    Time = source.clip != null ? source.time : 0f,
+                    TimeSamples = source.clip != null ? source.timeSamples : 0,
+                    Pitch = source.pitch,
+                    Volume = source.volume,
+                    Mute = source.mute,
+                    Loop = source.loop,
+                    PlayOnAwake = source.playOnAwake,
+                    Priority = source.priority,
+                    PanStereo = source.panStereo,
+                    SpatialBlend = source.spatialBlend,
+                    ReverbZoneMix = source.reverbZoneMix,
+                    DopplerLevel = source.dopplerLevel,
+                    Spread = source.spread,
+                    RolloffMode = source.rolloffMode,
+                    MinDistance = source.minDistance,
+                    MaxDistance = source.maxDistance,
+                    IgnoreListenerPause = source.ignoreListenerPause,
+                    IgnoreListenerVolume = source.ignoreListenerVolume,
+                    VelocityUpdateMode = source.velocityUpdateMode,
+                    OutputAudioMixerGroup = source.outputAudioMixerGroup,
+                    HasOutputAudioMixerGroup = source.outputAudioMixerGroup != null
+                };
+            }
+            catch
+            {
+                return null;
             }
         }
 
@@ -373,8 +567,26 @@ namespace UltrakillTAS
                     Source = source,
                     Playing = source.isPlaying,
                     Time = source.clip != null ? source.time : 0f,
+                    TimeSamples = source.clip != null ? source.timeSamples : 0,
                     Pitch = source.pitch,
-                    Volume = source.volume
+                    Volume = source.volume,
+                    Mute = source.mute,
+                    Loop = source.loop,
+                    PlayOnAwake = source.playOnAwake,
+                    Priority = source.priority,
+                    PanStereo = source.panStereo,
+                    SpatialBlend = source.spatialBlend,
+                    ReverbZoneMix = source.reverbZoneMix,
+                    DopplerLevel = source.dopplerLevel,
+                    Spread = source.spread,
+                    RolloffMode = source.rolloffMode,
+                    MinDistance = source.minDistance,
+                    MaxDistance = source.maxDistance,
+                    IgnoreListenerPause = source.ignoreListenerPause,
+                    IgnoreListenerVolume = source.ignoreListenerVolume,
+                    VelocityUpdateMode = source.velocityUpdateMode,
+                    OutputAudioMixerGroup = source.outputAudioMixerGroup,
+                    HasOutputAudioMixerGroup = source.outputAudioMixerGroup != null
                 });
             }
         }
@@ -393,13 +605,30 @@ namespace UltrakillTAS
                 {
                     source.pitch = snapshot.Pitch;
                     source.volume = snapshot.Volume;
+                    source.mute = snapshot.Mute;
+                    source.loop = snapshot.Loop;
+                    source.playOnAwake = snapshot.PlayOnAwake;
+                    source.priority = snapshot.Priority;
+                    source.panStereo = snapshot.PanStereo;
+                    source.spatialBlend = snapshot.SpatialBlend;
+                    source.reverbZoneMix = snapshot.ReverbZoneMix;
+                    source.dopplerLevel = snapshot.DopplerLevel;
+                    source.spread = snapshot.Spread;
+                    source.rolloffMode = snapshot.RolloffMode;
+                    source.minDistance = snapshot.MinDistance;
+                    source.maxDistance = snapshot.MaxDistance;
+                    source.ignoreListenerPause = snapshot.IgnoreListenerPause;
+                    source.ignoreListenerVolume = snapshot.IgnoreListenerVolume;
+                    source.velocityUpdateMode = snapshot.VelocityUpdateMode;
+                    if (snapshot.HasOutputAudioMixerGroup && snapshot.OutputAudioMixerGroup != null)
+                        source.outputAudioMixerGroup = snapshot.OutputAudioMixerGroup;
                     if (snapshot.Playing)
                     {
                         if (source.clip == null)
                             continue;
                         if (!source.isPlaying)
                             source.Play();
-                        source.time = Mathf.Clamp(snapshot.Time, 0f, Mathf.Max(0f, source.clip.length - 0.001f));
+                        source.timeSamples = Mathf.Clamp(snapshot.TimeSamples, 0, Mathf.Max(0, source.clip.samples - 1));
                     }
                     else if (source.isPlaying)
                     {
@@ -493,7 +722,7 @@ namespace UltrakillTAS
             state.PlayerColliders = CaptureColliders(movement.gameObject, MaxPlayerColliders);
             for (int r = 0; r < roots.Count; r++)
             {
-                CaptureParticles(roots[r], MaxRigParticles, state.PlayerParticles);
+                CaptureParticles(roots[r], MaxRigParticles, state.PlayerParticles, !_lightCapture);
                 CaptureAudio(roots[r], MaxRigAudio, state.PlayerAudio);
             }
         }
@@ -841,8 +1070,12 @@ namespace UltrakillTAS
             return _levelCache;
         }
 
-        void RestoreLevelElements(Savestate state, ref int restored, ref int missing)
+        void RestoreLevelElements(Savestate state, ref int restored, ref int missing, bool resetArenas)
         {
+            // Re-arming a destroyed arena trigger is only safe on a user load: a rewind runs
+            // many times per tick and must not create components or switch enemies off.
+            BeginArenaRestore(resetArenas);
+
             // A cutscene that is running now but was not in the state has to be torn down
             // before anything else: its coroutines would otherwise keep moving the map over
             // the values this load writes.
@@ -873,6 +1106,9 @@ namespace UltrakillTAS
                         RestoreAnimators(element.Animators);
                     if (root.activeSelf != element.Active)
                         root.SetActive(element.Active);
+                    // The game destroys ActivateArena/ActivateNextWave as a fight progresses; add
+                    // the saved component back before RestoreComponent writes its fields.
+                    RebuildArenaScript(element, root);
                     RestoreComponent(element.Component);
 
                     Transform transform = root.transform;
@@ -897,6 +1133,13 @@ namespace UltrakillTAS
             // Last: the objects above may have just been activated, and an animator only
             // takes a pose while it is active.
             RestoreAnimators(state.LevelAnimators);
+
+            // Re-arm the arenas whose trigger script this load had to rebuild: AutoSetupWaves
+            // rewires waves/doors, then the counters reset and the wave enemies go inactive.
+            // This is after the animator pass so the enemies are posed while they are still
+            // active; RestoreEnemies later writes their saved (inactive) state.
+            try { FinishArenaRestore(); }
+            catch (Exception ex) { _plugin.LogWarning("Arena trigger reset skipped: " + ex.Message); }
         }
 
         // ------------------------------------------------------------------
@@ -990,7 +1233,8 @@ namespace UltrakillTAS
                     if (component == null)
                         continue;
                     GameObject go = component.gameObject;
-                    if (state.SceneObjects.Contains(go) || state.ProjectileRoots.Contains(go))
+                    if (state.SceneObjects.Contains(go) || state.ProjectileRoots.Contains(go) ||
+                        _checkpointFresh.Contains(go))
                         continue;
                     if (go.name.StartsWith("ULTRAKILL_TAS", StringComparison.Ordinal))
                         continue;
@@ -1012,11 +1256,14 @@ namespace UltrakillTAS
         /// </summary>
         void CleanupEnemyOrphans(Savestate state)
         {
-            if (_identifierType == null || state.EnemyRoots.Count == 0)
+            // A state captured before any enemy existed must still sweep the wave the player
+            // spawned afterwards, so the guard is "the enemy pass ran", not "it found some".
+            if (_identifierType == null || !state.HasEnemySnapshot)
                 return;
             Component player = _bridge.PlayerComponent;
             Transform playerTransform = player != null ? player.transform : null;
 
+            int removed = 0;
             UnityEngine.Object[] found = UnityEngine.Object.FindObjectsOfType(_identifierType, true);
             for (int i = 0; i < found.Length; i++)
             {
@@ -1024,12 +1271,21 @@ namespace UltrakillTAS
                 if (identifier == null)
                     continue;
                 GameObject root = identifier.gameObject;
-                if (state.EnemyRoots.Contains(root) || IsTemplateClone(root))
+                // The saved set is by instance id, plus the live reference so a recycled id
+                // cannot make a different enemy survive the sweep. Anything else spawned after
+                // the capture is removed by destroying its root: the game's own OnDestroy runs
+                // for every component it carried, including any boss bar it owned.
+                if (state.EnemyIds.Contains(root.GetInstanceID()) || state.EnemyRoots.Contains(root) ||
+                    IsTemplateClone(root) || _checkpointFresh.Contains(root))
                     continue;
                 if (playerTransform != null && root.transform.IsChildOf(playerTransform))
                     continue;
                 UnityEngine.Object.Destroy(root);
+                removed++;
             }
+
+            if (removed > 0)
+                _plugin.LogInfo("Savestate load removed " + removed + " enemy object(s) spawned after the save.");
         }
     }
 }

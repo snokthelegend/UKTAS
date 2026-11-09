@@ -1,23 +1,17 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
+using System.Reflection;
 using UnityEngine;
+using UnityEngine.AI;
 
 namespace UltrakillTAS
 {
     /// <summary>
-    /// Extra enemy state.
-    ///
-    /// The core enemy capture restores an enemy that still exists. This module covers the
-    /// two cases it cannot:
-    ///
-    ///  - The enemy was destroyed (gibbed, dissolved, removed by a cleanup) after the save.
-    ///    A deactivated template of the enemy is stored at capture time and instantiated on
-    ///    load, then the saved identifier fields, health, behaviours, animator and hitboxes
-    ///    are written onto the new instance.
-    ///  - The enemy survived but one of its child objects did not (a shield, a wing, a melee
-    ///    hitbox that was destroyed or switched off). Child active flags, local poses and
-    ///    colliders are kept by hierarchy path, and a missing child is rebuilt from the same
-    ///    template.
+    /// In-place extra enemy state: child active flags, local poses and collider/renderer
+    /// flags, keyed by hierarchy path. Every enemy that still exists is restored where it is.
+    /// One that no longer exists is counted as missing; this module never instantiates prefabs
+    /// and never edits boss-bar/UI arrays.
     /// </summary>
     public sealed partial class SaveStateManager
     {
@@ -33,6 +27,8 @@ namespace UltrakillTAS
         {
             public string Path;
             public string Name;
+            /// <summary>Sibling index at capture, used to put a rebuilt child back where it was.</summary>
+            public int SiblingIndex;
             public bool ActiveSelf;
             public Vector3 LocalPosition;
             public Vector3 LocalRotationEuler;
@@ -55,8 +51,6 @@ namespace UltrakillTAS
             public string Key;
             public string DisplayName;
             public string IdentifierType;
-            public GameObject Template;
-            public bool HasTemplate;
             public List<EnemyChildState> Children;
             public List<EnemyChildCollider> Colliders;
             public List<EnemyChildRenderer> Renderers;
@@ -90,9 +84,9 @@ namespace UltrakillTAS
             for (int i = 0; i < enemies.Count; i++)
             {
                 EnemyState enemy = enemies[i];
-                // Dormant and dead enemies are Lightweight: they have no pose or children
-                // worth rebuilding, and cloning every sleeping arena actor is wasted work.
-                if (enemy == null || enemy.Lightweight)
+                // Every enemy now carries a complete state, including dormant and dead
+                // actors. Their child rigs and templates are what let them wake correctly.
+                if (enemy == null)
                     continue;
                 Component identifier = enemy.Identifier;
                 if (identifier == null)
@@ -112,16 +106,14 @@ namespace UltrakillTAS
                         IdentifierType = identifier.GetType().Name
                     };
                     // A light rolling-history capture skips the per-child walk (it can be
-                    // thousands of transforms in a boss arena) and keeps only the rebuild
-                    // recipe; slot saves always carry the full child state.
+                    // thousands of transforms in a boss arena); slot saves carry the full
+                    // child state.
                     if (!_lightCapture)
                     {
                         extra.Children = CaptureEnemyChildren(root);
                         extra.Colliders = CaptureEnemyColliders(root);
                         extra.Renderers = CaptureEnemyRenderers(root);
                     }
-                    extra.Template = GetOrCreateTemplate(identifier, root);
-                    extra.HasTemplate = extra.Template != null;
                     extras.Add(extra);
                 }
                 catch (Exception ex)
@@ -129,6 +121,10 @@ namespace UltrakillTAS
                     state.Warnings.Add("enemy extra " + identifier.name + ": " + ex.Message);
                 }
             }
+            // Gore scanning is a full-scene pass: slot saves and start states take it, the
+            // per-tick rolling history (which restores during undo only) does not.
+            if (!_lightCapture)
+                CaptureGoreIds(state);
             SetExt(state, "Enemies2", extras);
         }
 
@@ -147,13 +143,10 @@ namespace UltrakillTAS
                 GameObject root = identifier != null ? identifier.gameObject : null;
                 if (root == null)
                 {
-                    root = RebuildEnemy(state, extra);
-                    if (root == null)
-                    {
-                        missing++;
-                        continue;
-                    }
-                    identifier = Resolve(extra.Identifier);
+                    // The enemy no longer exists. Count it as missing and leave the scene
+                    // alone: no prefab lookup, no re-instantiation, no UI edits.
+                    missing++;
+                    continue;
                 }
 
                 try
@@ -190,6 +183,7 @@ namespace UltrakillTAS
                 {
                     Path = EnemyPath(rootTransform, transform),
                     Name = transform.name,
+                    SiblingIndex = transform.GetSiblingIndex(),
                     ActiveSelf = transform.gameObject.activeSelf,
                     LocalPosition = transform.localPosition,
                     LocalRotation = transform.localRotation,
@@ -297,21 +291,11 @@ namespace UltrakillTAS
                 return;
             Transform rootTransform = root.transform;
 
-            // Children can disappear from the hierarchy in any order; walk the saved list and
-            // recreate what is missing before writing poses, so a parent rebuilt at index N
-            // exists for the children that hang off it.
+            // Only children that still exist are restored in place. A child destroyed after
+            // the save (limb, shield, hitbox) stays gone: rebuilding it from a clone is what
+            // corrupted boss bars and other UI that holds references into the hierarchy.
             if (extra.Children != null)
             {
-                for (int i = 0; i < extra.Children.Count; i++)
-                {
-                    EnemyChildState child = extra.Children[i];
-                    if (child == null || string.IsNullOrEmpty(child.Path))
-                        continue;
-                    if (ResolveEnemyPath(rootTransform, child.Path) != null)
-                        continue;
-                    RebuildEnemyChild(extra, rootTransform, child);
-                }
-
                 for (int i = 0; i < extra.Children.Count; i++)
                 {
                     EnemyChildState child = extra.Children[i];
@@ -368,250 +352,49 @@ namespace UltrakillTAS
             }
         }
 
-        /// <summary>Instantiate the saved enemy template and put its whole saved state back.</summary>
-        GameObject RebuildEnemy(Savestate state, EnemyExtraState extra)
-        {
-            if (extra == null || !extra.HasTemplate || extra.Template == null)
-                return null;
-            EnemyState enemy = FindEnemyState(state, extra.Identifier);
-            if (enemy == null)
-                return null;
-
-            GameObject instance;
-            try
-            {
-                instance = UnityEngine.Object.Instantiate(extra.Template);
-            }
-            catch (Exception ex)
-            {
-                _plugin.LogWarning("Enemy respawn failed: " + ex.Message);
-                return null;
-            }
-
-            try
-            {
-                instance.name = string.IsNullOrEmpty(extra.DisplayName) ? "enemy" : extra.DisplayName;
-                instance.transform.position = enemy.Position;
-                instance.transform.rotation = enemy.Rotation;
-                instance.SetActive(false);
-
-                Component identifier = FindComponentByName(instance, extra.IdentifierType);
-                if (identifier == null)
-                {
-                    UnityEngine.Object.Destroy(instance);
-                    return null;
-                }
-
-                ApplyFields(identifier, enemy.Fields);
-                if (enemy.HasHealth)
-                    SetMember(identifier, HealthNames, enemy.Health);
-                SetMember(identifier, DeadNames, enemy.Dead);
-                SetMember(identifier, BleedNames, enemy.Bleed);
-                ApplyReferences(identifier, enemy.References);
-                RestoreListRefs(identifier, enemy.ListRefs);
-                RestoreRebuiltBehaviours(enemy, instance);
-                RestoreRebuiltAnimators(enemy, instance);
-
-                // Activate after the saved values are in, so Awake/OnEnable see them, then
-                // write them once more because some game scripts reset fields there.
-                instance.SetActive(enemy.ActiveSelf);
-                ApplyFields(identifier, enemy.Fields);
-                ApplyReferences(identifier, enemy.References);
-
-                Rigidbody body = instance.GetComponent<Rigidbody>();
-                if (body != null && enemy.Body != null)
-                    RestoreBodyOn(enemy.Body, body);
-
-                RestoreEnemyChildColliders(extra.Colliders, instance.transform);
-                RestoreEnemyChildRenderers(extra.Renderers, instance.transform);
-
-                // Later loads of this state restore the new instance in place, and the
-                // orphan sweep keeps it because its root is now part of the saved set.
-                enemy.Identifier = identifier;
-                enemy.Root = instance;
-                extra.Identifier = identifier;
-                extra.Root = instance;
-                state.EnemyRoots.Add(instance);
-                _plugin.LogInfo("Savestate rebuilt enemy '" + instance.name + "' from its template.");
-                return instance;
-            }
-            catch (Exception ex)
-            {
-                _plugin.LogWarning("Enemy respawn skipped: " + ex.Message);
-                return null;
-            }
-        }
-
-        static EnemyState FindEnemyState(Savestate state, Component identifier)
-        {
-            if (state == null || state.Enemies == null || identifier == null)
-                return null;
-            for (int i = 0; i < state.Enemies.Count; i++)
-            {
-                EnemyState enemy = state.Enemies[i];
-                if (enemy != null && ReferenceEquals(enemy.Identifier, identifier))
-                    return enemy;
-            }
-            return null;
-        }
-
-        static Component FindComponentByName(GameObject root, string typeName)
-        {
-            if (root == null || string.IsNullOrEmpty(typeName))
-                return null;
-            Component[] components = root.GetComponentsInChildren<Component>(true);
-            for (int i = 0; i < components.Length; i++)
-            {
-                Component component = components[i];
-                if (component != null && component.GetType().Name == typeName)
-                    return component;
-            }
-            return null;
-        }
-
-        /// <summary>Behaviours are matched to the new instance by type, in their saved order.</summary>
-        static void RestoreRebuiltBehaviours(EnemyState enemy, GameObject root)
-        {
-            if (enemy.Behaviours == null || root == null)
-                return;
-            MonoBehaviour[] components = root.GetComponentsInChildren<MonoBehaviour>(true);
-            Dictionary<Type, int> used = new Dictionary<Type, int>();
-            for (int i = 0; i < enemy.Behaviours.Count; i++)
-            {
-                ComponentSnapshot snapshot = enemy.Behaviours[i];
-                if (snapshot == null)
-                    continue;
-                Type type = null;
-                try
-                {
-                    if (!ReferenceEquals(snapshot.Component, null))
-                        type = snapshot.Component.GetType();
-                }
-                catch
-                {
-                }
-                if (type == null)
-                    continue;
-
-                int skip;
-                if (!used.TryGetValue(type, out skip))
-                    skip = 0;
-                int ordinal = 0;
-                MonoBehaviour target = null;
-                for (int c = 0; c < components.Length; c++)
-                {
-                    MonoBehaviour component = components[c];
-                    if (component == null || component.GetType() != type)
-                        continue;
-                    if (ordinal >= skip)
-                    {
-                        target = component;
-                        break;
-                    }
-                    ordinal++;
-                }
-                if (target == null)
-                    continue;
-                used[type] = skip + 1;
-                ApplyFields(target, snapshot.Fields);
-                ApplyReferences(target, snapshot.References);
-                RestoreListRefs(target, snapshot.ListRefs);
-            }
-        }
-
-        static void RestoreRebuiltAnimators(EnemyState enemy, GameObject root)
-        {
-            if (root == null)
-                return;
-            Animator primary = FindAnimator(root);
-            ApplyAnimatorSnapshot(primary, enemy.Animator);
-            if (enemy.ExtraAnimators == null || enemy.ExtraAnimators.Count == 0)
-                return;
-            Animator[] animators = root.GetComponentsInChildren<Animator>(true);
-            List<Animator> others = new List<Animator>(animators.Length);
-            for (int i = 0; i < animators.Length; i++)
-            {
-                if (animators[i] != null && !ReferenceEquals(animators[i], primary))
-                    others.Add(animators[i]);
-            }
-            int count = Math.Min(others.Count, enemy.ExtraAnimators.Count);
-            for (int i = 0; i < count; i++)
-                ApplyAnimatorSnapshot(others[i], enemy.ExtraAnimators[i]);
-        }
-
-        static void ApplyAnimatorSnapshot(Animator target, AnimatorState snapshot)
-        {
-            if (target == null || snapshot == null || target.runtimeAnimatorController == null)
-                return;
-            RestoreAnimator(new AnimatorState
-            {
-                Animator = target,
-                Enabled = snapshot.Enabled,
-                Speed = snapshot.Speed,
-                LayerCount = snapshot.LayerCount,
-                StateHashes = snapshot.StateHashes,
-                NormalizedTimes = snapshot.NormalizedTimes,
-                LayerWeights = snapshot.LayerWeights,
-                Parameters = snapshot.Parameters
-            });
-        }
-
-        /// <summary>BodyState points at the destroyed body, so the values are written onto the new one.</summary>
-        static void RestoreBodyOn(BodyState snapshot, Rigidbody body)
-        {
-            if (snapshot == null || body == null)
-                return;
-            try
-            {
-                body.constraints = snapshot.Constraints;
-                body.useGravity = snapshot.UseGravity;
-                body.detectCollisions = snapshot.DetectCollisions;
-                body.drag = snapshot.Drag;
-                body.angularDrag = snapshot.AngularDrag;
-                body.isKinematic = snapshot.IsKinematic;
-                if (!body.isKinematic)
-                {
-                    body.velocity = snapshot.Velocity;
-                    body.angularVelocity = snapshot.AngularVelocity;
-                    if (snapshot.Sleeping)
-                        body.Sleep();
-                    else
-                        body.WakeUp();
-                }
-            }
-            catch
-            {
-            }
-        }
 
         // ------------------------------------------------------------------
         // Hierarchy paths
         // ------------------------------------------------------------------
 
+        /// <summary>
+        /// A stable hierarchy path: "name#occurrence" per level, where occurrence counts the
+        /// siblings that share that name. Sibling indices were used before, but an enemy's
+        /// hierarchy gains and loses children while it fights and dies (effects, gibs, limbs),
+        /// and every child after the change then resolved to the wrong transform. Saved poses,
+        /// local scales and collider/renderer flags were written onto unrelated objects, which
+        /// is how an enemy could come back stretched or with its model still torn apart. A name
+        /// path keeps pointing at the same object while other siblings come and go.
+        /// </summary>
         static string EnemyPath(Transform root, Transform target)
         {
             if (root == null || target == null || ReferenceEquals(root, target))
                 return string.Empty;
-            List<int> indexes = new List<int>(4);
+            List<string> segments = new List<string>(4);
             Transform current = target;
             while (current != null && !ReferenceEquals(current, root))
             {
-                indexes.Add(current.GetSiblingIndex());
-                current = current.parent;
+                Transform parent = current.parent;
+                if (parent == null)
+                    return string.Empty;
+                int occurrence = 0;
+                int index = current.GetSiblingIndex();
+                for (int i = 0; i < index; i++)
+                {
+                    Transform sibling = parent.GetChild(i);
+                    if (sibling != null && sibling.name == current.name)
+                        occurrence++;
+                }
+                segments.Add(current.name + "#" + occurrence.ToString(CultureInfo.InvariantCulture));
+                current = parent;
             }
             if (current == null)
                 return string.Empty;
-            indexes.Reverse();
-            System.Text.StringBuilder builder = new System.Text.StringBuilder(8);
-            for (int i = 0; i < indexes.Count; i++)
-            {
-                if (i > 0)
-                    builder.Append('/');
-                builder.Append(indexes[i]);
-            }
-            return builder.ToString();
+            segments.Reverse();
+            return string.Join("/", segments.ToArray());
         }
 
+        /// <summary>Resolve a name#occurrence path. Null means the child is gone (rebuild it).</summary>
         static Transform ResolveEnemyPath(Transform root, string path)
         {
             if (root == null)
@@ -622,57 +405,150 @@ namespace UltrakillTAS
             Transform current = root;
             for (int i = 0; i < parts.Length; i++)
             {
-                int index;
-                if (!int.TryParse(parts[i], out index))
+                string part = parts[i];
+                int hash = part.LastIndexOf('#');
+                if (hash <= 0)
                     return null;
-                if (index < 0 || index >= current.childCount)
+                string name = part.Substring(0, hash);
+                int occurrence;
+                if (!int.TryParse(part.Substring(hash + 1), NumberStyles.Integer, CultureInfo.InvariantCulture, out occurrence) ||
+                    occurrence < 0)
                     return null;
-                current = current.GetChild(index);
-                if (current == null)
+                Transform next = null;
+                int seen = 0;
+                for (int c = 0; c < current.childCount; c++)
+                {
+                    Transform child = current.GetChild(c);
+                    if (child == null || child.name != name)
+                        continue;
+                    if (seen++ == occurrence)
+                    {
+                        next = child;
+                        break;
+                    }
+                }
+                if (next == null)
                     return null;
+                current = next;
             }
             return current;
         }
 
-        Transform RebuildEnemyChild(EnemyExtraState extra, Transform root, EnemyChildState child)
+
+        /// <summary>
+        /// Gore objects (gibs, severed limbs, blood pools, ragdolls) present when the state was
+        /// captured. A load destroys the ones the death created afterwards, so a revived enemy
+        /// is not surrounded by its own corpse, and a gibbed enemy is not left looking dead.
+        /// </summary>
+        void CaptureGoreIds(Savestate state)
         {
-            if (extra == null || extra.Template == null || root == null || child == null)
-                return null;
-            string path = child.Path;
-            int split = path.LastIndexOf('/');
-            string parentPath = split >= 0 ? path.Substring(0, split) : string.Empty;
-            string indexText = split >= 0 ? path.Substring(split + 1) : path;
-            int index;
-            if (!int.TryParse(indexText, out index))
-                return null;
-
-            Transform parent = ResolveEnemyPath(root, parentPath);
-            Transform templateParent = ResolveEnemyPath(extra.Template.transform, parentPath);
-            if (parent == null || templateParent == null || index < 0 || index >= templateParent.childCount)
-                return null;
-
-            Transform templateChild = templateParent.GetChild(index);
-            if (templateChild == null)
-                return null;
-
-            try
+            HashSet<int> ids = new HashSet<int>();
+            List<Type> types = GoreTypes();
+            for (int t = 0; t < types.Count; t++)
             {
-                GameObject clone = UnityEngine.Object.Instantiate(templateChild.gameObject);
-                clone.name = child.Name;
-                clone.SetActive(false);
-                clone.transform.SetParent(parent, false);
-                clone.transform.localPosition = child.LocalPosition;
-                clone.transform.localRotation = child.LocalRotation;
-                clone.transform.localScale = child.LocalScale;
-                if (clone.activeSelf != child.ActiveSelf)
-                    clone.SetActive(child.ActiveSelf);
-                return clone.transform;
+                UnityEngine.Object[] found;
+                try { found = UnityEngine.Object.FindObjectsOfType(types[t], true); }
+                catch { continue; }
+                for (int i = 0; i < found.Length; i++)
+                {
+                    Component component = found[i] as Component;
+                    if (component == null)
+                        continue;
+                    Transform root = component.transform.root;
+                    ids.Add(component.gameObject.GetInstanceID());
+                    if (root != null)
+                        ids.Add(root.gameObject.GetInstanceID());
+                }
             }
-            catch (Exception ex)
+            SetExt(state, "GoreIds", ids);
+        }
+
+        /// <summary>
+        /// Destroy gore spawned after the save. Objects that existed at capture are kept, as are
+        /// saved enemy roots, the player rig and this tool's templates.
+        /// </summary>
+        internal void CleanupGoreAfterRestore(Savestate state)
+        {
+            HashSet<int> saved = GetExt<HashSet<int>>(state, "GoreIds");
+            if (saved == null)
+                return;
+            Component player = _bridge.PlayerComponent;
+            Transform playerTransform = player != null ? player.transform : null;
+            List<Type> types = GoreTypes();
+            HashSet<GameObject> seen = new HashSet<GameObject>();
+            int removed = 0;
+            for (int t = 0; t < types.Count; t++)
             {
-                _plugin.LogWarning("Enemy child rebuild skipped: " + ex.Message);
-                return null;
+                UnityEngine.Object[] found;
+                try { found = UnityEngine.Object.FindObjectsOfType(types[t], true); }
+                catch { continue; }
+                for (int i = 0; i < found.Length; i++)
+                {
+                    Component component = found[i] as Component;
+                    if (component == null)
+                        continue;
+                    Transform rootTransform = component.transform.root;
+                    if (rootTransform == null)
+                        continue;
+                    GameObject root = rootTransform.gameObject;
+                    if (!seen.Add(root))
+                        continue;
+                    if (saved.Contains(root.GetInstanceID()) || saved.Contains(component.gameObject.GetInstanceID()))
+                        continue;
+                    if (IsTemplateClone(root) || state.EnemyRoots.Contains(root) ||
+                        state.ProjectileRoots.Contains(root))
+                        continue;
+                    if (playerTransform != null && rootTransform.IsChildOf(playerTransform))
+                        continue;
+                    UnityEngine.Object.Destroy(root);
+                    removed++;
+                }
             }
+            if (removed > 0)
+                _plugin.LogInfo("Savestate load removed " + removed + " gore object(s) spawned after the save.");
+        }
+
+        /// <summary>
+        /// Optimizer restores run thousands of times and their world never has gore from a
+        /// death (the master is captured before the segment), so the sweep is skipped there.
+        /// </summary>
+        bool _skipGoreSweep;
+
+        /// <summary>The tick, script time and script the capture belongs to, supplied by TasEngine.</summary>
+        public Func<int> TickProvider;
+        public Func<double> TimeProvider;
+        public Func<string> ScriptProvider;
+
+        static List<Type> _goreTypes;
+
+        /// <summary>
+        /// The game's gore component types, resolved once from the assembly that owns
+        /// EnemyIdentifier (the mod assembly has none of them).
+        /// </summary>
+        List<Type> GoreTypes()
+        {
+            if (_goreTypes != null)
+                return _goreTypes;
+            _goreTypes = new List<Type>();
+            if (_identifierType == null)
+                return _goreTypes;
+            Type[] all;
+            try { all = _identifierType.Assembly.GetTypes(); }
+            catch { return _goreTypes; }
+            for (int i = 0; i < all.Length; i++)
+            {
+                Type type = all[i];
+                if (type == null || !typeof(Component).IsAssignableFrom(type) || type.IsAbstract)
+                    continue;
+                string name = type.Name;
+                if (name.IndexOf("Gib", StringComparison.OrdinalIgnoreCase) < 0 &&
+                    name.IndexOf("Bloodstain", StringComparison.OrdinalIgnoreCase) < 0 &&
+                    name.IndexOf("BloodPool", StringComparison.OrdinalIgnoreCase) < 0 &&
+                    name.IndexOf("Gore", StringComparison.OrdinalIgnoreCase) < 0)
+                    continue;
+                _goreTypes.Add(type);
+            }
+            return _goreTypes;
         }
     }
 }

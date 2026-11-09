@@ -7,7 +7,8 @@
 //   Verify Raw Playback        pure live playback, first drift per block is reported
 //   Skip Baked Blocks to End   jump to the block's last baked frame, continue live after it
 // Any edit to the header or to a line before bake_end changes the block's checksum, and the
-// block is recorded again on the next run.
+// block is recorded again on the next run. For a block that should leave doors and streamed
+// map rooms live instead of baking them, use bake_start_nme in place of bake_start.
 version 1
 host_frametime 0.008
 seed 1337

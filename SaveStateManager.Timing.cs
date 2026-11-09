@@ -28,7 +28,9 @@ namespace UltrakillTAS
             public bool HasAccumulator;
             public double PhysicsAccumulator;
             public int LastTickSteps;
-            // Read-only snapshot of the game's Time.timeScale; never restored.
+            // The game's exact clock at the save. Restored after the hitstop decision so a
+            // state taken during slow motion, an assist-speed change or a stop comes back
+            // with the same scale instead of the scale of the timeline that was discarded.
             public float TimeScale;
             // Game hitstop: currentStop, the virtual stop timers, pitch and parry flash.
             public TimeControllerHitstopPatch.Snapshot Hitstop;
@@ -65,9 +67,9 @@ namespace UltrakillTAS
         /// <summary>
         /// Put the saved game hitstop back; runs after the module restores (which write the
         /// game TimeController's fields) and before the hitstop reset. True when the state
-        /// was taken inside a hitstop: currentStop and its timers are back (Time.timeScale
-        /// is the game's and is not written), and the caller must skip ResetHitstop so the stop runs its remaining ticks
-        /// and then ends through the game's ContinueTime.
+        /// was taken inside a hitstop: currentStop and its timers are back, and the caller
+        /// must skip ResetHitstop so the stop runs its remaining ticks and then ends through
+        /// the game's ContinueTime. Outside a stop the saved Time.timeScale is restored here.
         /// </summary>
         bool RestoreHitstop(Savestate state)
         {
@@ -75,6 +77,22 @@ namespace UltrakillTAS
             bool midStop = false;
             try { midStop = TimeControllerHitstopPatch.Restore(timing != null ? timing.Hitstop : null); }
             catch (Exception ex) { _plugin.LogWarning("Hitstop restore skipped: " + ex.Message); }
+
+            // Outside a stop, put the saved game scale back exactly. This is deliberately
+            // after the module restores (which write TimeController.timeScale and
+            // timeScaleModifier) and after the hitstop patch; a saved hitstop owns scale 0
+            // until the game's ContinueTime runs, so it is left alone in that case.
+            if (!midStop && timing != null)
+            {
+                try
+                {
+                    Time.timeScale = Mathf.Max(0f, timing.TimeScale);
+                }
+                catch (Exception ex)
+                {
+                    _plugin.LogWarning("Game time scale restore skipped: " + ex.Message);
+                }
+            }
 
             TimeController clock = _plugin.Clock;
             if (clock != null)
@@ -114,6 +132,21 @@ namespace UltrakillTAS
             }
 
             restored++;
+        }
+
+        /// <summary>
+        /// The fixed-step phase a state was captured on, read before a restore so the clock can
+        /// be aligned to it (see TimeController.QueueFixedStepAlign). False when the state has no
+        /// timing module or was taken before the accumulator was captured.
+        /// </summary>
+        public bool TryGetSavedPhysicsPhase(Savestate state, out double phase)
+        {
+            phase = 0.0;
+            TimingState timing = GetExt<TimingState>(state, "Timing");
+            if (timing == null || !timing.HasAccumulator)
+                return false;
+            phase = timing.PhysicsAccumulator;
+            return true;
         }
 
         /// <summary>

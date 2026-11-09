@@ -9,8 +9,8 @@ namespace UltrakillTAS
     /// <summary>
     /// "Show triggers": draws the level's trigger and event volumes near the camera, as
     /// solid translucent boxes (optional) under their outlines, with their names. Read-only.
-    /// The scene is scanned on a slow timer; the distance filter runs on the HUD timer;
-    /// drawing only projects the cached boxes.
+    /// The scene is scanned on a slow timer; the distance and frustum filters run on the HUD
+    /// timer; drawing only projects the cached boxes.
     /// </summary>
     public sealed partial class GuiManager
     {
@@ -47,18 +47,25 @@ namespace UltrakillTAS
             0, 1, 3, 2,   // z = min
             4, 5, 7, 6    // z = max
         };
+        static readonly Vector3[] BoxNormals =
+        {
+            Vector3.left, Vector3.right, Vector3.down, Vector3.up, Vector3.back, Vector3.forward
+        };
 
-        const int TriggerScanInterval = 300;
+        const int TriggerScanInterval = 600;
         const int MaxTriggerMarkers = 128;
         const int MaxTriggerScan = 4000;
 
         readonly List<Type> _triggerTypes = new List<Type>(64);
+        readonly HashSet<Type> _triggerTypeSet = new HashSet<Type>();
         bool _triggerTypesResolved;
         readonly List<TriggerMarker> _triggerAll = new List<TriggerMarker>(256);
         readonly List<TriggerMarker> _triggerVisible = new List<TriggerMarker>(MaxTriggerMarkers);
         readonly List<Collider> _triggerColliders = new List<Collider>(8);
         readonly HashSet<int> _triggerSeen = new HashSet<int>();
         readonly Vector3[] _triggerCorners = new Vector3[8];
+        readonly Vector3[] _triggerFace = new Vector3[4];
+        readonly Vector3[] _triggerClipped = new Vector3[16];
         int _triggerScanFrame = -100000;
         int _triggerSceneHandle = int.MinValue;
         Camera _overlayCamera;
@@ -98,15 +105,20 @@ namespace UltrakillTAS
                     continue;
                 if (type.Name.IndexOf("Trigger", StringComparison.Ordinal) >= 0 ||
                     type.Name.IndexOf("Event", StringComparison.Ordinal) >= 0)
+                {
                     _triggerTypes.Add(type);
+                    _triggerTypeSet.Add(type);
+                }
             }
             for (int i = 0; i < TriggerExtraTypeNames.Length; i++)
             {
                 Type type = _bridge.FindType(TriggerExtraTypeNames[i]);
                 if (type == null)
                     _plugin.LogWarning("Show triggers: game type '" + TriggerExtraTypeNames[i] + "' not found; it is skipped.");
-                else if (!_triggerTypes.Contains(type))
+                else if (_triggerTypeSet.Add(type))
+                {
                     _triggerTypes.Add(type);
+                }
             }
             _plugin.LogInfo("Show triggers: " + _triggerTypes.Count + " trigger/event component types.");
         }
@@ -164,45 +176,88 @@ namespace UltrakillTAS
             FilterTriggers();
         }
 
+        /// <summary>
+        /// One collider pass plus one trigger-script pass. The old code called
+        /// FindObjectsOfType once per type, which made enabling this overlay hitch the game.
+        /// </summary>
         void ScanTriggers()
         {
             _triggerAll.Clear();
             ResolveTriggerTypes();
             _triggerSeen.Clear();
-            for (int t = 0; t < _triggerTypes.Count && _triggerAll.Count < MaxTriggerScan; t++)
+            if (_triggerTypes.Count == 0)
+                return;
+
+            HashSet<int> ownersWithCollider = new HashSet<int>();
+            Collider[] colliders = null;
+            try { colliders = UnityEngine.Object.FindObjectsOfType<Collider>(); }
+            catch (Exception ex) { _plugin.LogWarning("Show triggers: collider scan failed: " + ex.Message); }
+            if (colliders != null)
             {
-                UnityEngine.Object[] found;
-                try
+                for (int i = 0; i < colliders.Length && _triggerAll.Count < MaxTriggerScan; i++)
                 {
-                    found = UnityEngine.Object.FindObjectsOfType(_triggerTypes[t]);
-                }
-                catch
-                {
-                    continue;
-                }
-                for (int i = 0; i < found.Length && _triggerAll.Count < MaxTriggerScan; i++)
-                {
-                    Component owner = found[i] as Component;
-                    if (owner == null)
+                    Collider collider = colliders[i];
+                    if (collider == null || !collider.enabled || !collider.isTrigger)
                         continue;
-                    string label = owner.GetType().Name + "  " + owner.gameObject.name;
-                    owner.GetComponents(_triggerColliders);
-                    bool any = false;
-                    for (int c = 0; c < _triggerColliders.Count; c++)
+                    Component owner = FindTriggerOwner(collider.gameObject);
+                    if (owner == null)
+                        owner = collider;
+                    ownersWithCollider.Add(collider.gameObject.GetInstanceID());
+                    if (!_triggerSeen.Add(collider.GetInstanceID()))
+                        continue;
+                    _triggerAll.Add(new TriggerMarker
                     {
-                        Collider collider = _triggerColliders[c];
-                        if (collider == null || !collider.isTrigger)
-                            continue;
-                        any = true;
-                        // One outline per collider, even when several scripts share it.
-                        if (!_triggerSeen.Add(collider.GetInstanceID()))
-                            continue;
-                        _triggerAll.Add(new TriggerMarker { Owner = owner, Collider = collider, Label = label });
-                    }
-                    if (!any && _triggerSeen.Add(owner.gameObject.GetInstanceID()))
-                        _triggerAll.Add(new TriggerMarker { Owner = owner, Label = label });
+                        Owner = owner,
+                        Collider = collider,
+                        Label = TriggerLabel(owner, collider.gameObject.name)
+                    });
                 }
             }
+
+            // Some level volumes are point markers or use a collider on a child. Find their
+            // trigger components once instead of scanning the whole scene for every type.
+            MonoBehaviour[] behaviours = null;
+            try { behaviours = UnityEngine.Object.FindObjectsOfType<MonoBehaviour>(); }
+            catch (Exception ex) { _plugin.LogWarning("Show triggers: script scan failed: " + ex.Message); }
+            if (behaviours != null)
+            {
+                for (int i = 0; i < behaviours.Length && _triggerAll.Count < MaxTriggerScan; i++)
+                {
+                    MonoBehaviour behaviour = behaviours[i];
+                    if (behaviour == null || !_triggerTypeSet.Contains(behaviour.GetType()))
+                        continue;
+                    int ownerId = behaviour.gameObject.GetInstanceID();
+                    if (ownersWithCollider.Contains(ownerId))
+                        continue;
+                    if (!_triggerSeen.Add(ownerId))
+                        continue;
+                    _triggerAll.Add(new TriggerMarker
+                    {
+                        Owner = behaviour,
+                        Label = TriggerLabel(behaviour, behaviour.gameObject.name)
+                    });
+                }
+            }
+
+            _plugin.LogInfo("Show triggers: " + _triggerAll.Count + " markers cached.");
+        }
+
+        Component FindTriggerOwner(GameObject gameObject)
+        {
+            Component[] components = gameObject.GetComponents<Component>();
+            for (int i = 0; i < components.Length; i++)
+            {
+                Component component = components[i];
+                if (component != null && _triggerTypeSet.Contains(component.GetType()))
+                    return component;
+            }
+            return null;
+        }
+
+        static string TriggerLabel(Component owner, string objectName)
+        {
+            string typeName = owner is Collider ? "Trigger" : owner.GetType().Name;
+            return typeName + "  " + objectName;
         }
 
         void FilterTriggers()
@@ -214,6 +269,10 @@ namespace UltrakillTAS
             Vector3 eye = camera.transform.position;
             float range = Mathf.Clamp(_plugin.ShowTriggersDistance.Value, 5f, 500f);
             float rangeSq = range * range;
+            Plane[] planes = null;
+            try { planes = GeometryUtility.CalculateFrustumPlanes(camera); }
+            catch { planes = null; }
+
             for (int i = 0; i < _triggerAll.Count && _triggerVisible.Count < MaxTriggerMarkers; i++)
             {
                 TriggerMarker marker = _triggerAll[i];
@@ -224,7 +283,12 @@ namespace UltrakillTAS
                 {
                     if (!marker.Collider.enabled)
                         continue;
-                    distanceSq = marker.Collider.bounds.SqrDistance(eye);
+                    Bounds bounds = marker.Collider.bounds;
+                    distanceSq = bounds.SqrDistance(eye);
+                    // Frustum culling keeps partially visible boxes; it only drops boxes that
+                    // are completely outside the view.
+                    if (planes != null && !GeometryUtility.TestPlanesAABB(planes, bounds))
+                        continue;
                 }
                 else
                 {
@@ -264,6 +328,67 @@ namespace UltrakillTAS
             return camera.WorldToViewportPoint(world);
         }
 
+        static Plane NearPlane(Camera camera)
+        {
+            Vector3 forward = camera.transform.forward;
+            return new Plane(forward, camera.transform.position + forward * camera.nearClipPlane);
+        }
+
+        static bool ClipSegmentToNear(Vector3 a, Vector3 b, Plane near, out Vector3 clippedA, out Vector3 clippedB)
+        {
+            float da = near.GetDistanceToPoint(a);
+            float db = near.GetDistanceToPoint(b);
+            bool insideA = da >= 0f;
+            bool insideB = db >= 0f;
+            clippedA = a;
+            clippedB = b;
+            if (!insideA && !insideB)
+                return false;
+
+            if (!insideA)
+            {
+                float t = da / (da - db);
+                clippedA = a + (b - a) * t;
+            }
+            else if (!insideB)
+            {
+                float t = db / (db - da);
+                clippedB = b + (a - b) * t;
+            }
+            return true;
+        }
+
+        /// <summary>Clips a convex polygon to the near plane, preserving winding.</summary>
+        static int ClipPolygonToNear(Vector3[] input, int count, Plane near, Vector3[] output)
+        {
+            int outCount = 0;
+            for (int i = 0; i < count; i++)
+            {
+                Vector3 current = input[i];
+                Vector3 previous = input[(i + count - 1) % count];
+                float dc = near.GetDistanceToPoint(current);
+                float dp = near.GetDistanceToPoint(previous);
+                bool currentInside = dc >= 0f;
+                bool previousInside = dp >= 0f;
+                if (currentInside)
+                {
+                    if (!previousInside && outCount < output.Length)
+                    {
+                        float t = dp / (dp - dc);
+                        output[outCount++] = previous + (current - previous) * t;
+                    }
+                    if (outCount < output.Length)
+                        output[outCount++] = current;
+                }
+                else if (previousInside && outCount < output.Length)
+                {
+                    float t = dp / (dp - dc);
+                    output[outCount++] = previous + (current - previous) * t;
+                }
+            }
+            return outCount;
+        }
+
         /// <summary>Called from OnGUI. Draws only what FilterTriggers kept; no allocation.</summary>
         void DrawTriggerOverlay()
         {
@@ -295,6 +420,7 @@ namespace UltrakillTAS
             Color oldColor = GUI.color;
             Color fillColor = new Color(boxColor.r, boxColor.g, boxColor.b,
                 Mathf.Clamp(_plugin.ShowTriggersOpacity.Value, 0.02f, 1f));
+            Plane near = NearPlane(camera);
 
             if (gl)
             {
@@ -302,7 +428,7 @@ namespace UltrakillTAS
                 _lineMaterial.SetPass(0);
                 GL.LoadPixelMatrix();
                 if (_plugin.ShowTriggersSolid.Value)
-                    DrawSolidTriggerBoxes(camera, width, height, fillColor);
+                    DrawSolidTriggerBoxes(camera, near, width, height, fillColor);
                 GL.Begin(GL.LINES);
             }
             for (int i = 0; i < _triggerVisible.Count; i++)
@@ -317,22 +443,28 @@ namespace UltrakillTAS
                     Vector3 max = bounds.max;
                     for (int c = 0; c < 8; c++)
                     {
-                        Vector3 corner = new Vector3((c & 1) != 0 ? max.x : min.x,
-                                                     (c & 2) != 0 ? max.y : min.y,
-                                                     (c & 4) != 0 ? max.z : min.z);
-                        _triggerCorners[c] = ToViewport(camera, corner);
+                        _triggerCorners[c] = new Vector3((c & 1) != 0 ? max.x : min.x,
+                                                        (c & 2) != 0 ? max.y : min.y,
+                                                        (c & 4) != 0 ? max.z : min.z);
                     }
                     if (gl)
                     {
                         GL.Color(boxColor);
                         for (int e = 0; e < BoxEdges.Length; e += 2)
                         {
-                            Vector3 a = _triggerCorners[BoxEdges[e]];
-                            Vector3 b = _triggerCorners[BoxEdges[e + 1]];
-                            if (a.z <= 0f || b.z <= 0f)
+                            Vector3 a;
+                            Vector3 b;
+                            if (!ClipSegmentToNear(_triggerCorners[BoxEdges[e]],
+                                                   _triggerCorners[BoxEdges[e + 1]], near, out a, out b))
                                 continue;
-                            GL.Vertex3(a.x * width, a.y * height, 0f);
-                            GL.Vertex3(b.x * width, b.y * height, 0f);
+                            Vector3 va = ToViewport(camera, a);
+                            Vector3 vb = ToViewport(camera, b);
+                            if (va.z <= 0f || vb.z <= 0f)
+                                continue;
+                            if (SegmentOffScreen(va, vb))
+                                continue;
+                            GL.Vertex3(va.x * width, va.y * height, 0f);
+                            GL.Vertex3(vb.x * width, vb.y * height, 0f);
                         }
                     }
                     else
@@ -389,44 +521,120 @@ namespace UltrakillTAS
             GUI.color = oldColor;
         }
 
-        /// <summary>
-        /// Fills each visible trigger volume with translucent quads. A box is skipped when any of
-        /// its corners is behind the camera, so nothing is projected across the view.
-        /// </summary>
-        void DrawSolidTriggerBoxes(Camera camera, float width, float height, Color color)
+        static bool SegmentOffScreen(Vector3 a, Vector3 b)
         {
-            GL.Begin(GL.QUADS);
+            return (a.x < 0f && b.x < 0f) || (a.x > 1f && b.x > 1f) ||
+                   (a.y < 0f && b.y < 0f) || (a.y > 1f && b.y > 1f);
+        }
+
+        /// <summary>
+        /// Fills each visible trigger volume with translucent triangles. Faces are clipped to
+        /// the near plane instead of skipping a volume when one corner is behind the camera;
+        /// outside the volume only front-facing faces are drawn, which cuts overdraw in half.
+        /// </summary>
+        void DrawSolidTriggerBoxes(Camera camera, Plane near, float width, float height, Color color)
+        {
+            GL.Begin(GL.TRIANGLES);
             GL.Color(color);
+            Vector3 eye = camera.transform.position;
             for (int i = 0; i < _triggerVisible.Count; i++)
             {
                 TriggerMarker marker = _triggerVisible[i];
                 if (marker.Collider == null || !GameBridge.IsAlive(marker.Collider) || !marker.Collider.enabled)
                     continue;
                 Bounds bounds = marker.Collider.bounds;
-                Vector3 min = bounds.min;
-                Vector3 max = bounds.max;
-                bool behind = false;
-                for (int c = 0; c < 8; c++)
+                bool inside = bounds.Contains(eye);
+                for (int f = 0; f < 6; f++)
                 {
-                    Vector3 corner = new Vector3((c & 1) != 0 ? max.x : min.x,
-                                                 (c & 2) != 0 ? max.y : min.y,
-                                                 (c & 4) != 0 ? max.z : min.z);
-                    _triggerCorners[c] = ToViewport(camera, corner);
-                    if (_triggerCorners[c].z <= 0f)
-                        behind = true;
-                }
-                if (behind)
-                    continue;
-                for (int f = 0; f < BoxFaces.Length; f += 4)
-                {
-                    for (int k = 0; k < 4; k++)
+                    FillFace(bounds, f, _triggerFace);
+                    Vector3 center = (_triggerFace[0] + _triggerFace[1] + _triggerFace[2] + _triggerFace[3]) * 0.25f;
+                    Vector3 normal = BoxNormals[f];
+                    if (!inside && Vector3.Dot(normal, eye - center) <= 0f)
+                        continue;
+
+                    int clipped = ClipPolygonToNear(_triggerFace, 4, near, _triggerClipped);
+                    if (clipped < 3)
+                        continue;
+
+                    float minX = float.MaxValue;
+                    float minY = float.MaxValue;
+                    float maxX = float.MinValue;
+                    float maxY = float.MinValue;
+                    for (int k = 0; k < clipped; k++)
                     {
-                        Vector3 v = _triggerCorners[BoxFaces[f + k]];
-                        GL.Vertex3(v.x * width, v.y * height, 0f);
+                        Vector3 v = ToViewport(camera, _triggerClipped[k]);
+                        if (v.z <= 0f)
+                        {
+                            minX = float.MaxValue;
+                            break;
+                        }
+                        minX = Mathf.Min(minX, v.x);
+                        minY = Mathf.Min(minY, v.y);
+                        maxX = Mathf.Max(maxX, v.x);
+                        maxY = Mathf.Max(maxY, v.y);
+                    }
+                    if (minX == float.MaxValue || maxX < 0f || minX > 1f || maxY < 0f || minY > 1f)
+                        continue;
+
+                    for (int k = 1; k < clipped - 1; k++)
+                    {
+                        Vector3 a = ToViewport(camera, _triggerClipped[0]);
+                        Vector3 b = ToViewport(camera, _triggerClipped[k]);
+                        Vector3 c = ToViewport(camera, _triggerClipped[k + 1]);
+                        if (a.z <= 0f || b.z <= 0f || c.z <= 0f)
+                            continue;
+                        GL.Vertex3(a.x * width, a.y * height, 0f);
+                        GL.Vertex3(b.x * width, b.y * height, 0f);
+                        GL.Vertex3(c.x * width, c.y * height, 0f);
                     }
                 }
             }
             GL.End();
+        }
+
+        static void FillFace(Bounds bounds, int face, Vector3[] output)
+        {
+            Vector3 min = bounds.min;
+            Vector3 max = bounds.max;
+            switch (face)
+            {
+                case 0:
+                    output[0] = new Vector3(min.x, min.y, min.z);
+                    output[1] = new Vector3(min.x, min.y, max.z);
+                    output[2] = new Vector3(min.x, max.y, max.z);
+                    output[3] = new Vector3(min.x, max.y, min.z);
+                    break;
+                case 1:
+                    output[0] = new Vector3(max.x, min.y, min.z);
+                    output[1] = new Vector3(max.x, max.y, min.z);
+                    output[2] = new Vector3(max.x, max.y, max.z);
+                    output[3] = new Vector3(max.x, min.y, max.z);
+                    break;
+                case 2:
+                    output[0] = new Vector3(min.x, min.y, min.z);
+                    output[1] = new Vector3(max.x, min.y, min.z);
+                    output[2] = new Vector3(max.x, min.y, max.z);
+                    output[3] = new Vector3(min.x, min.y, max.z);
+                    break;
+                case 3:
+                    output[0] = new Vector3(min.x, max.y, min.z);
+                    output[1] = new Vector3(min.x, max.y, max.z);
+                    output[2] = new Vector3(max.x, max.y, max.z);
+                    output[3] = new Vector3(max.x, max.y, min.z);
+                    break;
+                case 4:
+                    output[0] = new Vector3(min.x, min.y, min.z);
+                    output[1] = new Vector3(min.x, max.y, min.z);
+                    output[2] = new Vector3(max.x, max.y, min.z);
+                    output[3] = new Vector3(max.x, min.y, min.z);
+                    break;
+                default:
+                    output[0] = new Vector3(min.x, min.y, max.z);
+                    output[1] = new Vector3(max.x, min.y, max.z);
+                    output[2] = new Vector3(max.x, max.y, max.z);
+                    output[3] = new Vector3(min.x, max.y, max.z);
+                    break;
+            }
         }
 
         /// <summary>Fallback without the line shader: the screen rectangle around the projected box corners.</summary>

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using HarmonyLib;
 using UnityEngine;
 using SysRandom = System.Random;
@@ -181,6 +182,43 @@ namespace UltrakillTAS
         {
             UnityRandom.InitState(CurrentSeed);
             _seedStream = CurrentSeed;
+        }
+
+        [StructLayout(LayoutKind.Explicit)]
+        struct UnityStateBits
+        {
+            [FieldOffset(0)] public UnityRandom.State State;
+            [FieldOffset(0)] public int S0;
+            [FieldOffset(4)] public int S1;
+            [FieldOffset(8)] public int S2;
+            [FieldOffset(12)] public int S3;
+        }
+
+        /// <summary>
+        /// Hash of UnityEngine.Random.state, for the determinism trace: two runs that restored a
+        /// checkpoint differently report a different hash on the resumed tick, before the
+        /// divergence has had time to move the player. 0 when the state cannot be read.
+        /// </summary>
+        public ulong UnityStateHash()
+        {
+            try
+            {
+                UnityStateBits bits = default(UnityStateBits);
+                bits.State = UnityRandom.state;
+                unchecked
+                {
+                    ulong h = 1469598103934665603UL;
+                    h = (h ^ (uint)bits.S0) * 1099511628211UL;
+                    h = (h ^ (uint)bits.S1) * 1099511628211UL;
+                    h = (h ^ (uint)bits.S2) * 1099511628211UL;
+                    h = (h ^ (uint)bits.S3) * 1099511628211UL;
+                    return h;
+                }
+            }
+            catch
+            {
+                return 0UL;
+            }
         }
 
         public UnityRandom.State CaptureUnityState()

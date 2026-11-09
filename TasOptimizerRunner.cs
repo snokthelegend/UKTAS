@@ -40,6 +40,8 @@ namespace UltrakillTAS
     /// Frame-driven attempt loop. The engine calls <see cref="OnFrameEnd"/> after every game frame.
     /// Each attempt: restore master at StartTick, play the candidate to EndTick, sampling every tick,
     /// stop early on death, then hand the samples to <see cref="TasOptimizer.CompleteAttempt"/>.
+    /// EndTick is the evaluation horizon: only ticks before Config.MutateEndTick may differ from
+    /// the baseline, and the remaining ticks are still played and sampled downstream.
     /// Attempts repeat on the same segment until the user stops the run; a candidate that cannot be
     /// spliced or rewound counts as an invalid attempt and the next frame rolls a new one.
     /// The runner does nothing until the engine has played up to StartTick, so ordinary playback is untouched
@@ -137,16 +139,51 @@ namespace UltrakillTAS
                 return;
             }
 
+            // Play through the whole evaluation horizon. When MutateEndTick is earlier, every
+            // tick after it is the untouched baseline, which is what lets delayed effects
+            // (parry heals, blood splatter, enemy deaths) arrive before scoring at EndTick.
             if (tick > start && tick <= end)
             {
                 OptimSample sample;
                 if (_host.TrySample(out sample))
                 {
                     sample.Tick = tick;
-                    _samples.Add(sample);
-                    if (sample.Dead)
+                    // Per-tick telemetry: speed and its tick-to-tick delta drive credit assignment.
+                    if (_samples.Count > 0)
+                        sample.AccelXZ = sample.SpeedXZ - _samples[_samples.Count - 1].SpeedXZ;
+                    // -1 means no jump was seen since the attempt began; the air-slide gate treats
+                    // that as "cannot prove a jump", so it does not add a slide there.
+                    sample.TicksSinceJump = -1;
+                    // SSJ is a jump edge 1-3 fixed frames after StopSlide. Requiring the previous
+                    // sample to be grounded keeps wall jumps (which use a different TrySSJ formula)
+                    // out of the combat/movement score. Jumping out of a still-held slide resets
+                    // framesSinceSlide to 0, so it correctly does not count.
+                    if (_samples.Count > 0)
                     {
-                        EndAttempt();
+                        OptimSample previous = _samples[_samples.Count - 1];
+                        sample.Jumped = sample.Jumping && !previous.Jumping;
+                        // Ticks since the last jump edge, for the air-slide window: the game only
+                        // starts a slide in the air within 0.06 s of a jump from the ground.
+                        if (sample.Jumped)
+                            sample.TicksSinceJump = 0;
+                        else if (previous.TicksSinceJump >= 0)
+                            sample.TicksSinceJump = previous.TicksSinceJump + 1;
+                        if (sample.Jumped && previous.Grounded && !sample.Sliding &&
+                            sample.SlideRecoveryKnown && sample.FramesSinceSlide > 0 &&
+                            sample.FramesSinceSlide < sample.SSJMaxFrames)
+                        {
+                            sample.SSJ = true;
+                            sample.SSJQuality = 1f / (float)Math.Pow(2.0, sample.FramesSinceSlide - 1);
+                        }
+                    }
+                    _samples.Add(sample);
+                    if (_optimizer.IsDoomed(_samples))
+                    {
+                        // The attempt can no longer be valid (death, a keep-out box, or an
+                        // every-frame constraint already broken): stop playing it here instead of
+                        // running the rest of the segment. On long windows this is where most of
+                        // the attempts per second come from.
+                        EndAttempt(true);
                         return;
                     }
                 }
@@ -159,9 +196,10 @@ namespace UltrakillTAS
         /// The attempt is over (EndTick reached or death). Headless, its last frame renders first and the
         /// scoring waits one frame; otherwise it is scored now.
         /// </summary>
-        void EndAttempt()
+        void EndAttempt(bool doomed = false)
         {
-            if (_host.ShowEndFrame())
+            // A doomed attempt has nothing to show and no chance of scoring, so it is scored at once.
+            if (!doomed && _host.ShowEndFrame())
             {
                 _endFramePending = true;
                 return;
@@ -223,6 +261,8 @@ namespace UltrakillTAS
         {
             _attemptActive = false;
             _waitingForStart = false;
+            // A null result means the candidate never reached the game. Adaptive ML removes the
+            // operator sample it reserved instead of counting this as a losing mutation.
             _optimizer.CompleteAttempt(null);
             if (!_optimizer.Running)
             {
@@ -476,13 +516,51 @@ namespace UltrakillTAS
             _bridge.TryGetMovementState(out onGround, out sliding, out dashing, out jumping);
             float health, hardDamage;
             bool hasHealth = _bridge.TryGetHealth(out health, out hardDamage);
+            int framesSinceSlide;
+            int ssjMaxFrames;
+            bool slideRecoveryKnown = _bridge.TryGetSlideRecovery(out framesSinceSlide, out ssjMaxFrames);
+            bool slamReady;
+            bool slamming;
+            bool jumpCooldown;
+            float boostCharge;
+            _bridge.TryGetSlamReady(out slamReady);
+            _bridge.TryGetSlamming(out slamming);
+            _bridge.TryGetAutofuncState(out jumpCooldown, out boostCharge);
             sample.Position = position;
             sample.Velocity = velocity;
+            sample.SpeedXZ = Mathf.Sqrt(velocity.x * velocity.x + velocity.z * velocity.z);
+            sample.Buttons = ButtonsOnTick(_engine.CurrentTick);
             sample.Grounded = onGround;
+            sample.Sliding = sliding;
+            sample.Dashing = dashing;
+            sample.Jumping = jumping;
+            sample.SlideRecoveryKnown = slideRecoveryKnown;
+            sample.FramesSinceSlide = framesSinceSlide;
+            sample.SSJMaxFrames = ssjMaxFrames;
+            sample.SlamReady = slamReady;
+            sample.Slamming = slamming;
+            sample.JumpCooldown = jumpCooldown;
+            sample.BoostCharge = boostCharge;
             sample.Health = hasHealth ? health : 0f;
+            sample.HardDamage = hasHealth ? hardDamage : 0f;
             // Falling out of the level counts as a death (the engine skips its kill-plane pause during attempts).
             sample.Dead = (hasHealth && health <= 0f) || _bridge.PlayerBelowKillPlane;
             return true;
+        }
+
+        /// <summary>
+        /// Input held on the tick being sampled. The geometry detector uses this to distinguish a
+        /// wall bonk under movement input from ordinary speed loss.
+        /// </summary>
+        TasButtons ButtonsOnTick(int tick)
+        {
+            if (_candidateScript == null)
+                return TasButtons.None;
+            TickLocation location = _candidateScript.Locate(tick);
+            if (!location.Valid || location.LineIndex < 0 || location.LineIndex >= _candidateLines.Count)
+                return TasButtons.None;
+            TasFrameLine line = _candidateLines[location.LineIndex];
+            return line != null ? line.Buttons : TasButtons.None;
         }
 
         public void Finish(string message)

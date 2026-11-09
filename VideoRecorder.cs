@@ -294,6 +294,10 @@ namespace UltrakillTAS
             // Fast-forward (F7, ff lines, FFF NoRefresh) is off for the whole recording.
             engine.CancelFastForwardForRecording();
             SuppressTasVisuals();
+            // RenderOptimizer sees IsRecording and restores the normal visual pipeline now,
+            // before the first captured frame.
+            if (_plugin.PerfRendering != null)
+                _plugin.PerfRendering.Update();
             Status = "Recording " + Path.GetFileName(outputPath) + ": " + fps + " fps, " + samples +
                      " sub-frames per tick (" + Mathf.RoundToInt((float)(samples / engine.Script.Properties.HostFrametime)) +
                      " fps virtual), shutter " + Mathf.RoundToInt(shutter * 360f) + " deg.";
@@ -315,6 +319,9 @@ namespace UltrakillTAS
             if (!IsRecording)
                 return false;
             IsRecording = false;
+            // Bring Performance Render Mode back as soon as the last frame is captured.
+            if (_plugin.PerfRendering != null)
+                _plugin.PerfRendering.Update();
 
             bool ok = true;
             try

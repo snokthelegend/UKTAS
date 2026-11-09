@@ -39,13 +39,12 @@ namespace UltrakillTAS
         {
             MiscModuleState misc = new MiscModuleState();
             Type randomType = FindMathRandomType();
-            Type seaType = randomType != null ? _bridge.FindType("SeaBodies") : null;
-            if (seaType != null)
+            if (randomType != null)
             {
                 UnityEngine.Object[] found;
-                try { found = UnityEngine.Object.FindObjectsOfType(seaType, true); }
+                try { found = UnityEngine.Object.FindObjectsOfType(typeof(MonoBehaviour), true); }
                 catch { found = new UnityEngine.Object[0]; }
-                for (int i = 0; i < found.Length; i++)
+                for (int i = 0; i < found.Length && misc.Randoms.Count < 200000; i++)
                 {
                     Component component = found[i] as Component;
                     if (component == null || IsTemplateClone(component.gameObject))
@@ -56,7 +55,7 @@ namespace UltrakillTAS
                     }
                     catch (Exception ex)
                     {
-                        state.Warnings.Add("SeaBodies random: " + ex.Message);
+                        state.Warnings.Add("Unity.Mathematics.Random on " + component.GetType().Name + ": " + ex.Message);
                     }
                 }
             }

@@ -62,6 +62,7 @@ namespace UltrakillTAS
         SaveStateManager _states;
         TasEngine _engine;
         GuiManager _gui;
+        RenderOptimizer _renderOptimizer;
         FrameEndHook _frameEnd;
         GameObject _frameEndObject;
         bool _fastForwardKeyHeld;
@@ -71,6 +72,10 @@ namespace UltrakillTAS
         bool _guiWasVisible;
         bool _freecamCursorWasFree;
         bool _sceneHooked;
+        // The optimizer run currently owns Application.runInBackground; the value below is the
+        // game's own setting to put back when the run ends.
+        bool _optimizerBackgroundHeld;
+        bool _optimizerSavedRunInBackground;
 
         public readonly List<TasMessage> Messages = new List<TasMessage>(64);
         public string ScriptDirectory { get; private set; }
@@ -104,6 +109,8 @@ namespace UltrakillTAS
         public ConfigEntry<bool> RestartLevelOnPlay;
         public ConfigEntry<string> PlayStartLevel;
         public ConfigEntry<int> PlayStartStateSlot;
+        /// <summary>Reset the level to its last map checkpoint before a user-initiated savestate load.</summary>
+        public ConfigEntry<bool> ResetToMapCheckpointOnLoad;
         public ConfigEntry<bool> GuiVisibleOnStart;
         public ConfigEntry<bool> UnlockAllWeapons;
         public ConfigEntry<bool> WaitForPlayerControl;
@@ -128,7 +135,8 @@ namespace UltrakillTAS
         public ConfigEntry<string> FfmpegPath;
         public ConfigEntry<string> RecordingDirectory;
         public ConfigEntry<bool> RecordCleanRender;
-        public ConfigEntry<bool> RecordAudio;        public ConfigEntry<float> KillPlaneY;
+        public ConfigEntry<bool> RecordAudio;
+        public ConfigEntry<float> KillPlaneY;
         public ConfigEntry<bool> StepRecord;
         public ConfigEntry<int> RollingHistoryTicks;
         public ConfigEntry<bool> HistoryDuringPlayback;
@@ -140,6 +148,13 @@ namespace UltrakillTAS
         public ConfigEntry<bool> UseNorefresh;
         public ConfigEntry<bool> NoRefreshFastForward;
         public ConfigEntry<bool> PauseAtNoRefreshBreak;
+        /// <summary>Debug: frame offset used when a norefresh checkpoint's state is cached. 0 is the marker's own tick.</summary>
+        public ConfigEntry<int> NorefreshTickOffset;
+        /// <summary>Debug: extra ticks given to (or taken from) the framebulk a norefresh resume starts in, for that run only.</summary>
+        public ConfigEntry<int> NorefreshBulkFrames;
+        public ConfigEntry<bool> NorefreshBakeSync;
+        /// <summary>How many ticks after a norefresh checkpoint the temporary sync bake covers; 0 = until the next bake block or the end of the script.</summary>
+        public ConfigEntry<int> NorefreshSyncTicks;
         public ConfigEntry<bool> ShowHud;
         public ConfigEntry<bool> HudShowSpeed;
         public ConfigEntry<bool> HudShowVelocity;
@@ -163,6 +178,16 @@ namespace UltrakillTAS
         public ConfigEntry<bool> HideViewmodels;
         public ConfigEntry<bool> ShowHitboxes;
         public ConfigEntry<bool> ShowPlayerHitbox;
+        public ConfigEntry<bool> PerformanceRenderMode;
+        public ConfigEntry<bool> PerfDisableShadows;
+        public ConfigEntry<bool> PerfDisablePostProcessing;
+        public ConfigEntry<bool> PerfDisableCosmeticParticles;
+        public ConfigEntry<bool> PerfSuppressAllParticles;
+        public ConfigEntry<bool> PerfDisableDecals;
+        public ConfigEntry<bool> PerfDisablePixelLights;
+        public ConfigEntry<bool> PerfFullbright;
+        public ConfigEntry<bool> PerfFastSkinning;
+        public ConfigEntry<bool> PerfZeroParticleRaycasts;
         public ConfigEntry<string> HudCorner;
         public ConfigEntry<int> HudOffsetX;
         public ConfigEntry<int> HudOffsetY;
@@ -218,6 +243,9 @@ namespace UltrakillTAS
 
         public ConfigFile ConfigFile { get { return Config; } }
         public GuiManager Gui { get { return _gui; } }
+
+        /// <summary>Performance Render Mode: rendering-only overrides, see RenderOptimizer.</summary>
+        public RenderOptimizer PerfRendering { get { return _renderOptimizer; } }
         /// <summary>SAR-style player path: recording, world drawing, hover and click.</summary>
         public TrajectoryManager Trajectory { get; private set; }
         /// <summary>Coin flight paths. 'clearcoinpaths' (field 8) wipes them.</summary>
@@ -305,6 +333,7 @@ namespace UltrakillTAS
             }
 
             _bridge = new GameBridge(this);
+            _renderOptimizer = new RenderOptimizer(this);
             WeaponUnlock.UnlockAll = UnlockAllWeapons.Value;
             FistHudDump.InstallTrace(); // TEMP diagnostic: traces who hides the fist HUD
             _rng = new RngController(this, _bridge);
@@ -324,6 +353,7 @@ namespace UltrakillTAS
 
             _states = new SaveStateManager(this, _bridge, _rng);
             _states.ResetHitstop = _time.ResetHitstop;
+            CoroutineTracker.Install();
             _engine = new TasEngine(this, _bridge, _time, _input, _states, _rng);
             _gui = new GuiManager(this, _engine, _time, _states, _bridge, _input, _rng);
             Trajectory = new TrajectoryManager(this);
@@ -462,6 +492,8 @@ namespace UltrakillTAS
                 "Run a script's FFF segments headless (GoldSrc r_norefresh): every tick before an FFF marker simulates with all cameras' culling masks cleared, so no 3D geometry, shadows or lighting reach the GPU, at uncapped CPU speed. Rendering comes back on the framebulk immediately after the marker. F5 or F11 aborts at the current tick.");
             PauseAtNoRefreshBreak = Config.Bind(general, "Pause at the FFF breakpoint", false,
                 "When a NoRefresh run reaches its FFF breakpoint, pause playback at that exact tick instead of continuing with normal rendering.");
+            NorefreshTickOffset = Config.Bind(general, "Norefresh capture offset", -1,
+                "Which tick a norefresh checkpoint's state is cached on, relative to the marker: 0 caches on the marker's own tick, a negative value (the default, -1) one tick later, a positive one one tick earlier. -1 is the boundary that lines the resumed world up with continuous playback. Also in the NoRefresh card as the 'Capture offset' slider; changing it there clears the cache so the next Play re-captures.");
             AutoReloadOnPlay = Config.Bind(general, "Reload script on Play", true,
                 "When the script file changed on disk since it was loaded or saved, Play (F5) reloads it first. Edit the .uktas in any editor and press Play; no need to click Load.");
             AutoShowLeaderboard = Config.Bind(general, "Auto-show leaderboard", false,
@@ -482,6 +514,14 @@ namespace UltrakillTAS
                 "Scene name used when On Play = level. Empty falls back to the script header's load_level.");
             PlayStartStateSlot = Config.Bind(general, "Startup savestate slot", 0,
                 "Slot restored before frame 1 when On Play = state (0-9).");
+            NorefreshBakeSync = Config.Bind(general, "Norefresh: bake the first frames after a checkpoint", false,
+                "When a norefresh checkpoint is cached, also record the first ticks after the resumed tick into a temporary .ukbake in the temp folder (the script is never modified). A resume writes those baked frames on every tick, so the player position and velocity re-sync to the recorded trajectory; the rest of the run then plays live. The bake is hash-stamped with the script's rows over the covered range, so editing those frames makes the resume ignore it. Baked state applied this way marks the run as not submittable.");
+            NorefreshSyncTicks = Config.Bind(general, "Norefresh: sync bake ticks", 30,
+                "How many ticks after a norefresh checkpoint the temporary sync bake covers (the NoRefresh card's Sync bake ticks slider). The default 30 re-syncs the resumed world over a short fixed window and then plays the rest of the run live; 0 records to the next real bake block or the end of the script.");
+            NorefreshBulkFrames = Config.Bind(general, "Norefresh resume bulk frames", 0,
+                "Debug: ticks added to (negative: removed from) the framebulk a norefresh checkpoint resumes in, for the resumed run only. The script and its saved frame counts are not changed; the next Play/resume uses the value.");
+            ResetToMapCheckpointOnLoad = Config.Bind(general, "Load map checkpoint on savestate load", false,
+                "When a savestate or a norefresh checkpoint is loaded, reload the level through the same StatsManager.Restart path as the pause menu's CHECKPOINT button first: the last map checkpoint you touched ends the arena music, re-arms its checkpoint-scoped objects and rebuilds its rooms and arenas, then the saved values are written on top. Skipped when no checkpoint has been touched or the level is already finished. Off by default: it replaces the live room objects, which costs a moment and cannot be undone without reloading the level.");
             RecordingFile = Config.Bind(general, "Recording file", "recording.uktas",
                 "File name (or absolute path) a recording is saved to when no script file is loaded. Relative names go to the script directory.");
             LastScriptFile = Config.Bind(general, "Last script file", string.Empty,
@@ -572,6 +612,26 @@ namespace UltrakillTAS
             HideViewmodels = Config.Bind(overlay, "Hide viewmodels", false, "Do not draw the first-person weapon and arm models. Only their renderers are hidden; weapon logic, input and physics are untouched.");
             ShowHitboxes = Config.Bind(overlay, "Show hitboxes", false, "Draw enemy collider bounds (hitboxes/hurtboxes) as read-only outlines near the camera.");
             ShowPlayerHitbox = Config.Bind(overlay, "Show player hitbox", false, "Draw the local player's collision bounds. Non-trigger colliders are preferred; these are the shapes that collide with walls and that trigger volumes detect.");
+            PerformanceRenderMode = Config.Bind(overlay, "Performance render mode", false,
+                "Strip GPU-only rendering during playback for maximum FPS: shadows, the post-process output material, cosmetic particles, decals and optional engine quality reductions. Decals use Decal-layer and source-level suppression only; enemy, limb and gib layers are never culled. Colliders, triggers, physics layer assignments and every gameplay Update/FixedUpdate are untouched, so the run result is identical with it on or off.");
+            PerfDisableShadows = Config.Bind(overlay, "Performance render: shadows", true,
+                "With Performance Render Mode on: QualitySettings.shadows = Disable and reflection probes are switched off. Scanned only when the section is enabled or a level loads. Restored when the section ends.");
+            PerfDisablePostProcessing = Config.Bind(overlay, "Performance render: post-processing", true,
+                "With Performance Render Mode on: hide ULTRAKILL's virtual-camera post-process quad and copy its final color buffer straight to the screen, bypassing post-processing and CRT shaders. PostProcessV2_Handler itself stays enabled so the camera and level-restart pipeline keep working; the original output is restored when this option is switched off.");
+            PerfDisableCosmeticParticles = Config.Bind(overlay, "Performance render: cosmetic particles", true,
+                "With Performance Render Mode on: dedicated particle layers are removed from Camera.main.cullingMask and ULTRAKILL's blood/decal spawn methods are skipped at the source. Particle systems keep simulating and collision callbacks still run; no scene scan or renderer toggling occurs.");
+            PerfSuppressAllParticles = Config.Bind(overlay, "Performance render: all particle renderers", false,
+                "With Performance Render Mode on: hide every ParticleSystemRenderer, including weapon, projectile and explosion particles. Particles still simulate and collision callbacks still run; only their rendering is hidden. New effects are picked up by a periodic scan.");
+            PerfDisableDecals = Config.Bind(overlay, "Performance render: decals", true,
+                "With Performance Render Mode on: only the Decal layer is removed from Camera.main.cullingMask and the blood/oil composite is skipped. Bloodstain visual update/spawn methods are skipped with Harmony prefixes. Enemy, Limb and Gib layers are never culled, and no collider or gameplay component is touched.");
+            PerfDisablePixelLights = Config.Bind(overlay, "Performance render: pixel lights", true,
+                "With Performance Render Mode on: QualitySettings.pixelLightCount = 0, removing extra forward-lighting passes. The original count is cached and restored when the mode or this option is switched off.");
+            PerfFullbright = Config.Bind(overlay, "Performance render: fullbright", true,
+                "With Performance Render Mode on: disable scene lights and use flat white ambient light. Visual only; colliders, triggers and gameplay scripts are untouched. Every light and RenderSettings value is restored when the option is switched off.");
+            PerfFastSkinning = Config.Bind(overlay, "Performance render: one-bone skinning", true,
+                "With Performance Render Mode on: set every enemy SkinnedMeshRenderer.quality to Bone1 and QualitySettings.skinWeights to OneBone. Per-renderer quality and the global setting are restored on exit. Animation and gameplay logic are untouched.");
+            PerfZeroParticleRaycasts = Config.Bind(overlay, "Performance render: particle raycasts", true,
+                "With Performance Render Mode on: QualitySettings.particleRaycastBudget = 0 so cosmetic particle systems cannot fire physics raycasts. The original budget is restored when the mode or this option is switched off.");
             HudCorner = Config.Bind(overlay, "HUD corner", "topleft", "Where the HUD panel is anchored: topleft, topright, bottomleft or bottomright.");
             HudOffsetX = Config.Bind(overlay, "HUD offset X", 10, "Distance from the anchored screen edge, in pixels.");
             HudOffsetY = Config.Bind(overlay, "HUD offset Y", 10, "Distance from the anchored screen edge, in pixels.");
@@ -689,6 +749,9 @@ namespace UltrakillTAS
             _tickFrame = frame;
             // First thing in the tick, so an exception later in the tick cannot skip the game helpers.
             GameToggles.Update();
+            // Rendering-only overrides; never advances or changes the simulation.
+            if (_renderOptimizer != null)
+                _renderOptimizer.Update();
             LastGuiMilliseconds = _guiMilliseconds;
             _guiMilliseconds = 0.0;
 
@@ -736,6 +799,7 @@ namespace UltrakillTAS
 
             if (_engine != null)
                 _engine.BeginFrame();
+            SyncOptimizerBackgroundRun();
             if (_gui != null)
             {
                 // Speed is read every frame (the speedometer must not lag); the rest of the
@@ -744,6 +808,35 @@ namespace UltrakillTAS
                 _gui.UpdateCache();
             }
             UpdateCursorState();
+        }
+
+        /// <summary>
+        /// Keep the player updating while its window is not focused for the length of an optimizer
+        /// run.
+        ///
+        /// A Unity player built with "Run In Background" off (ULTRAKILL has no option for it) pauses
+        /// its whole player loop as soon as it loses focus: no Update, no rendered frame, and because
+        /// playback is frame-locked, no optimizer attempt either. The setting is raised while a run is
+        /// attached and put back the moment it ends, so ordinary playback keeps the game's own focus
+        /// behaviour.
+        /// </summary>
+        void SyncOptimizerBackgroundRun()
+        {
+            bool running = _engine != null && _engine.OptimizerRunning;
+            if (running == _optimizerBackgroundHeld)
+                return;
+            _optimizerBackgroundHeld = running;
+            if (running)
+            {
+                _optimizerSavedRunInBackground = Application.runInBackground;
+                Application.runInBackground = true;
+                LogInfo("Optimizer running: the game keeps updating at full speed while its window is in the background.");
+            }
+            else
+            {
+                Application.runInBackground = _optimizerSavedRunInBackground;
+                LogInfo("Optimizer stopped: background running restored to " + _optimizerSavedRunInBackground + ".");
+            }
         }
 
         /// <summary>
@@ -829,6 +922,10 @@ namespace UltrakillTAS
         {
             if (_engine != null)
                 _engine.EndFrame();
+            // Push optimizer paths from the frame loop, not only from OnGUI: freecam and a
+            // hidden TAS window still get the current-best/baseline/candidate lines.
+            if (_gui != null)
+                _gui.PushOptimizerOverlay();
 
             // NoRefresh: the 3D screen is off and the tick counter is racing. The path
             // recorder and freecam only feed what is drawn, so their per-frame work is
@@ -981,6 +1078,8 @@ namespace UltrakillTAS
                 _bridge.Entities.OnSceneLoaded(scene, mode);
             if (_gui != null)
                 _gui.OnSceneChanged();
+            if (_renderOptimizer != null)
+                _renderOptimizer.OnSceneChanged();
             // Trails from the previous level would hang in the new one.
             if (CoinPaths != null)
                 CoinPaths.Clear();
@@ -1040,6 +1139,8 @@ namespace UltrakillTAS
             SceneManager.sceneLoaded -= OnSceneLoaded;
             _sceneHooked = false;
 
+            if (_renderOptimizer != null)
+                _renderOptimizer.Shutdown();
             if (Video != null && Video.IsRecording)
                 Video.Stop("shutdown");
             if (Trajectory != null)

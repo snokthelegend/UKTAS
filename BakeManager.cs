@@ -165,16 +165,19 @@ namespace UltrakillTAS
     }
 
     /// <summary>
-    /// Optional TAS baking (bake_start [name] ... bake_end in the frames section).
+    /// Optional TAS baking (bake_start [name] / bake_start_nme [name] ... bake_end in the frames section).
     ///
     /// Record: the first run of a block (or a run after any edit above or inside it changes its
     /// checksum) plays the real inputs and writes the world state at the end of every tick into a
     /// pooled memory buffer; at the block's last tick the buffer goes to
-    /// "&lt;script&gt;-&lt;block&gt;.ukbake" next to the script (GZip, one file per block).
+    /// "&lt;script&gt;-&lt;block&gt;.ukbake" next to the script (GZip, one file per block). A
+    /// bake_start_nme block records the same player, enemy, projectile and RNG state but leaves
+    /// doors and the map rooms they stream out of the file; those map elements stay live.
     ///
     /// Enforced playback ("Enable Baked Playback"): the real inputs still run every tick, so
     /// animations, sounds and hitstops happen naturally, and at the end of the tick the baked
-    /// state is written over the world (player, projectiles, enemies, RNG, doors and rooms).
+    /// state is written over the world (player, projectiles, enemies, RNG, and for normal blocks
+    /// doors and rooms; an NME block has no door/room state to write).
     ///
     /// Hot path (enforced and verify): a block's frames are decoded once into typed arrays; live
     /// projectiles are kept in a cached set keyed by the recorded key and rescanned (one
@@ -384,6 +387,341 @@ namespace UltrakillTAS
         static bool s_runRecordedBake;
         static bool s_runBakedPlaybackWasOn;
 
+        /// <summary>
+        /// Raw-input runs (a norefresh resume, a determinism test) must never be snapped to a
+        /// baked state, even when Enable Baked Playback is on: the point is the script's own
+        /// physics. Set by TasEngine when the run resumes a checkpoint.
+        /// </summary>
+        public static bool PureInputOnly { get; set; }
+
+        // ------------------------------------------------------------------
+        // Norefresh sync bake (temporary, this session only)
+        // ------------------------------------------------------------------
+        //
+        // A norefresh checkpoint is cached mid-run, and a resume can drift from continuous
+        // playback (engine state a savestate does not carry). With "Norefresh: bake the first
+        // frames after a checkpoint" on, the engine asks for a temporary bake of the ticks
+        // right after the cache point: the first N ticks (default 30, the NoRefresh card's
+        // Sync bake ticks slider; 0 = to the next real bake block or the script's end). They
+        // are recorded on the continuous run into a scratch .ukbake in the temp directory,
+        // stamped with the script's own hash over exactly that tick range. A resume loads it
+        // and writes those frames over the same ticks, so the player and the baked world
+        // state are re-synced, and the rest of the run then plays live from that state.
+        // Editing the frames inside the covered range changes the hash, so a stale file is
+        // simply not found and nothing is applied. The baked write is deliberate even though
+        // PureInputOnly is set on a resume: only this temp bake is exempt, and it taints the
+        // run as non-submittable like any other applied baked state.
+
+        /// <summary>
+        /// Ticks covered by the temporary norefresh sync bake: from the resume boundary to the
+        /// next real bake block or the end of the script, capped at the configured window
+        /// (default 30 ticks; 0 keeps the whole range).
+        /// </summary>
+        int NorefreshSyncTickCount(TasScript script, int startTick)
+        {
+            if (script == null || startTick < 0)
+                return 0;
+            int end = script.TotalTicks;
+            IList<TasBakeBlock> blocks = script.BakeBlocks;
+            for (int i = 0; i < blocks.Count; i++)
+            {
+                int blockStart = blocks[i].StartTick;
+                if (blockStart > startTick && blockStart < end)
+                    end = blockStart;
+            }
+            int count = end > startTick ? end - startTick : 0;
+            int cap = _plugin != null && _plugin.NorefreshSyncTicks != null ? _plugin.NorefreshSyncTicks.Value : 0;
+            if (cap > 0 && count > cap)
+                count = cap;
+            return count;
+        }
+
+        bool _syncRecording;
+        int _syncStartTick;
+        int _syncTickCount;
+        string _syncHash = string.Empty;
+        string _syncPath = string.Empty;
+        TasBakeBlock _syncBlock;
+        BakeBlockData _syncData;
+
+        // Norefresh auto bake_end (only a norefresh resume arms this): the bake block the
+        // resume lands in is closed when the sync window ends, as if a bake_end stood there.
+        // The script, its block ranges and its .ukbake files are never changed.
+        int _resumeBakeEndResumeTick;
+        int _resumeBakeEndTick;
+        bool _resumeBakeEndPending;
+        int _resumeBakeEndBlock;
+        // The scripted range of a block the auto bake_end closed: those ticks play live for
+        // the rest of this run instead of re-entering the block.
+        int _autoEndedBlockStart;
+        int _autoEndedBlockEnd;
+
+        /// <summary>Temp .ukbake path for a range hash (deterministic, so a resume finds it again).</summary>
+        public static string NorefreshSyncPath(string hash)
+        {
+            if (string.IsNullOrEmpty(hash))
+                return string.Empty;
+            try
+            {
+                return Path.Combine(Path.GetTempPath(), "uktas-norefresh-sync-" +
+                                    hash.Substring(0, Math.Min(16, hash.Length)) + Extension);
+            }
+            catch
+            {
+                return string.Empty;
+            }
+        }
+
+        /// <summary>
+        /// Starts recording the ticks that follow a freshly cached norefresh checkpoint. Only a
+        /// complete range is written; a partial buffer is dropped when playback leaves it.
+        /// </summary>
+        public void BeginNorefreshSync(TasScript script, int startTick)
+        {
+            CancelNorefreshSync();
+            if (script == null || startTick < 0)
+                return;
+            if (_recording || _active != null)
+            {
+                _plugin.LogInfo("Norefresh sync: not recorded, a bake block is active at tick " + startTick + ".");
+                return;
+            }
+            int tickCount = NorefreshSyncTickCount(script, startTick);
+            if (tickCount <= 0)
+                return;
+            int end = startTick + tickCount;
+            string hash = script.HashTickRange(startTick, tickCount);
+            string path = NorefreshSyncPath(hash);
+            if (path.Length == 0)
+                return;
+            IList<TasBakeBlock> blocks = script.BakeBlocks;
+            for (int i = 0; i < blocks.Count; i++)
+            {
+                if (blocks[i].StartTick < end && blocks[i].EndTick > startTick)
+                {
+                    _plugin.LogInfo("Norefresh sync: not recorded, the range overlaps bake block '" +
+                                    blocks[i].FileName + "'.");
+                    return;
+                }
+            }
+            _syncHash = hash;
+            _syncPath = path;
+            _syncStartTick = startTick;
+            _syncTickCount = tickCount;
+            _syncBlock = new TasBakeBlock
+            {
+                Index = -1,
+                Name = "norefresh sync",
+                FileName = "norefresh-sync",
+                StartTick = startTick,
+                EndTick = end,
+                Hash = hash
+            };
+            _recBuffer.SetLength(0);
+            _recOffsets.Clear();
+            _recSystemRandoms.Clear();
+            _syncRecording = true;
+            _plugin.LogInfo("Norefresh sync: recording ticks " + startTick + "-" + (end - 1) +
+                            " (" + tickCount + " ticks) into " + Path.GetFileName(path) + ".");
+        }
+
+        /// <summary>
+        /// Loads the sync bake for the checkpoint being resumed. The range hash is recomputed from
+        /// the current script, so frames edited after the marker can never match the recorded file.
+        /// </summary>
+        public bool ArmNorefreshSync(TasScript script, int startTick)
+        {
+            CancelNorefreshSync();
+            if (script == null || startTick < 0)
+                return false;
+            int tickCount = NorefreshSyncTickCount(script, startTick);
+            if (tickCount <= 0)
+                return false;
+            string hash = script.HashTickRange(startTick, tickCount);
+            string path = NorefreshSyncPath(hash);
+            string reason;
+            BakeBlockData data = Load(path, hash, out reason);
+            if (data == null)
+            {
+                if (!string.IsNullOrEmpty(reason))
+                    _plugin.LogInfo("Norefresh sync bake not used: " + reason + ".");
+                return false;
+            }
+            if (data.StartTick != startTick || data.TickCount != tickCount || !Decode(data, out reason))
+            {
+                _plugin.LogInfo("Norefresh sync bake not used: " +
+                                (reason ?? "its tick range does not match the resume") + ".");
+                Delete(path);
+                return false;
+            }
+            _syncData = data;
+            _syncHash = hash;
+            _syncPath = path;
+            _syncStartTick = startTick;
+            _syncTickCount = data.TickCount;
+            _projValidMask = 0;
+            _syncBlock = new TasBakeBlock
+            {
+                Index = -1,
+                Name = "norefresh sync",
+                FileName = "norefresh-sync",
+                StartTick = data.StartTick,
+                EndTick = data.StartTick + data.TickCount,
+                Hash = hash
+            };
+            ResetCorrections(_syncBlock);
+            _plugin.LogInfo("Norefresh sync: applying " + data.TickCount + " baked ticks from tick " +
+                            startTick + " after the resume.");
+            return true;
+        }
+
+        /// <summary>
+        /// Arms the automatic bake_end of a norefresh resume: the bake block the resume lands
+        /// in is closed when the sync window ends, as if a bake_end stood there. Only this
+        /// resumed run is affected; the script, its block ranges and its .ukbake files are not.
+        /// </summary>
+        public void ArmNorefreshBakeEnd(int resumeTick, int tickCount)
+        {
+            CancelNorefreshBakeEnd();
+            if (resumeTick < 0 || tickCount <= 0)
+                return;
+            _resumeBakeEndResumeTick = resumeTick;
+            _resumeBakeEndTick = resumeTick + 1 + tickCount;
+            _resumeBakeEndPending = true;
+            _plugin.LogInfo("Bake: norefresh auto bake_end armed for tick " + _resumeBakeEndTick +
+                            " (" + tickCount + " ticks after the resume).");
+        }
+
+        /// <summary>Forgets a pending or armed automatic bake_end (a fresh run or a new script).</summary>
+        public void CancelNorefreshAutoEnd()
+        {
+            CancelNorefreshBakeEnd();
+            ClearAutoEndedBlock();
+        }
+
+        void CancelNorefreshBakeEnd()
+        {
+            _resumeBakeEndResumeTick = 0;
+            _resumeBakeEndTick = 0;
+            _resumeBakeEndPending = false;
+            _resumeBakeEndBlock = 0;
+        }
+
+        void ClearAutoEndedBlock()
+        {
+            _autoEndedBlockStart = 0;
+            _autoEndedBlockEnd = 0;
+        }
+
+        /// <summary>Forgets the sync bake (an unfinished recording is dropped).</summary>
+        public void CancelNorefreshSync()
+        {
+            if (_syncRecording)
+                _plugin.LogInfo("Norefresh sync: recording dropped before it covered all " + _syncTickCount + " ticks.");
+            _syncRecording = false;
+            _syncData = null;
+            _syncBlock = null;
+            // Never touch the buffer of a real bake block that is recording right now.
+            if (!_recording)
+            {
+                _recBuffer.SetLength(0);
+                _recOffsets.Clear();
+                _recSystemRandoms.Clear();
+            }
+        }
+
+        /// <summary>
+        /// Per-tick half of the sync bake, called by the engine's EndFrame with the tick that just
+        /// ran: records the range on the continuous run, applies it on a resume.
+        /// </summary>
+        public void OnNorefreshSyncTick(int tick, TasEngine engine)
+        {
+            if (_syncRecording)
+            {
+                // A capture offset can put the recording range a tick or two behind the tick
+                // that runs next; those ticks still play live, the range starts when it is reached.
+                if (tick < _syncStartTick)
+                    return;
+                if (tick != _syncStartTick + _recOffsets.Count)
+                {
+                    CancelNorefreshSync();
+                    return;
+                }
+                try
+                {
+                    EnsurePlayer();
+                    RecordTick(tick, engine.CurrentTime, false);
+                }
+                catch (Exception ex)
+                {
+                    _plugin.LogWarning("Norefresh sync: recording tick " + tick + " failed: " + ex.Message);
+                    CancelNorefreshSync();
+                    return;
+                }
+                if (_recOffsets.Count == _syncTickCount)
+                    FinishNorefreshSync();
+                return;
+            }
+
+            if (_syncData == null || tick < _syncData.StartTick ||
+                tick >= _syncData.StartTick + _syncData.TickCount)
+                return;
+            // A real block with a valid bake owns this tick; the sync bake never writes twice.
+            if (_activeData != null)
+                return;
+            int index = tick - _syncData.StartTick;
+            EnsurePlayer();
+            if (index == 0)
+                _projValidMask = -1;
+            TrackProjectiles(_syncData, index, 0);
+            BeginCorrectionTick();
+            ApplyFrame(_syncData, index, true, true);
+            EndCorrectionTick(tick);
+            if (index == _syncData.TickCount - 1)
+            {
+                LogCorrections(_syncBlock, true);
+                _syncData = null;
+                _syncBlock = null;
+                _plugin.Toast("Norefresh sync: re-synced over " + _syncTickCount + " frames.", false);
+            }
+        }
+
+        void FinishNorefreshSync()
+        {
+            _syncRecording = false;
+            if (_recOffsets.Count != _syncTickCount)
+            {
+                _plugin.LogWarning("Norefresh sync: recorded " + _recOffsets.Count + " of " +
+                                   _syncTickCount + " ticks; nothing written.");
+                CancelNorefreshSync();
+                return;
+            }
+            BakeBlockData data = new BakeBlockData
+            {
+                Path = _syncPath,
+                Name = "norefresh sync",
+                Hash = _syncHash,
+                StartTick = _syncStartTick,
+                TickCount = _syncTickCount,
+                Offsets = _recOffsets.ToArray(),
+                DataLength = (int)_recBuffer.Length,
+                Version = FormatVersion,
+                SystemRandoms = _recSystemRandoms.Count == _syncTickCount ? _recSystemRandoms.ToArray() : null
+            };
+            data.Data = new byte[data.DataLength];
+            Buffer.BlockCopy(_recBuffer.GetBuffer(), 0, data.Data, 0, data.DataLength);
+            string error;
+            if (Save(data, out error))
+                _plugin.LogInfo("Norefresh sync: wrote " + _recOffsets.Count + " ticks to " +
+                                Path.GetFileName(_syncPath) + ".");
+            else
+                _plugin.LogWarning("Norefresh sync: write failed: " + error);
+            _recBuffer.SetLength(0);
+            _recSystemRandoms.Clear();
+            if (_recBuffer.Capacity > (8 << 20))
+                _recBuffer.Capacity = 1 << 20;
+        }
+
         /// <summary>True while "Enable Baked Playback" is switched on.</summary>
         public static bool BakedPlaybackEnabled
         {
@@ -458,7 +796,7 @@ namespace UltrakillTAS
         {
             TasEngine engine = _plugin.Engine;
             TasScript script = engine != null ? engine.Script : null;
-            _engaged = script != null && script.HasBakeBlocks;
+            _engaged = script != null && (script.HasBakeBlocks || _syncRecording || _syncData != null);
             if (!_engaged)
                 return;
             _tickBefore = engine.CurrentTick;
@@ -472,8 +810,10 @@ namespace UltrakillTAS
             // frames it waits on the game, and a skip at tick 0 is decided on such a frame.
             TasEngine engine = _plugin.Engine;
             TasScript script = engine != null ? engine.Script : null;
-            if (script == null || !script.HasBakeBlocks)
+            if (script == null || (!script.HasBakeBlocks && !_syncRecording && _syncData == null))
             {
+                if (_syncRecording || _syncData != null)
+                    CancelNorefreshSync();
                 if (_engaged || _active != null)
                 {
                     _engaged = false;
@@ -507,7 +847,10 @@ namespace UltrakillTAS
 
             int now = engine.CurrentTick;
             if (_tickBeforeValid && now == _tickBefore + 1)
+            {
+                OnNorefreshSyncTick(_tickBefore, engine);
                 OnTickExecuted(_tickBefore, engine, script);
+            }
             else if (_tickBeforeValid && now != _tickBefore)
                 BreakContinuity();
             _tickBeforeValid = false;
@@ -523,6 +866,8 @@ namespace UltrakillTAS
         void SetScript(TasScript script, string path)
         {
             ResetRun();
+            CancelNorefreshSync();
+            CancelNorefreshAutoEnd();
             _script = script;
             _scriptPath = path ?? string.Empty;
             _loaded.Clear();
@@ -555,6 +900,7 @@ namespace UltrakillTAS
         void BreakContinuity()
         {
             ResetRun();
+            ClearAutoEndedBlock();
         }
 
         void OnTickExecuted(int tick, TasEngine engine, TasScript script)
@@ -563,6 +909,23 @@ namespace UltrakillTAS
                 ResetRun();
             _lastTick = tick;
 
+            // A block the norefresh auto bake_end closed early is not entered again: its
+            // remaining scripted ticks play live until the block's original end.
+            if (_autoEndedBlockEnd > 0)
+            {
+                if (tick >= _autoEndedBlockStart && tick < _autoEndedBlockEnd)
+                {
+                    if (!ReferenceEquals(StatusText, StatusLive))
+                    {
+                        StatusText = StatusLive;
+                        DetailText = string.Empty;
+                    }
+                    return;
+                }
+                if (tick >= _autoEndedBlockEnd)
+                    ClearAutoEndedBlock();
+            }
+
             if (_active == null || tick < _active.StartTick || tick >= _active.EndTick)
             {
                 if (_active != null)
@@ -570,6 +933,7 @@ namespace UltrakillTAS
                 _lastTick = tick;
                 if (!EnterBlockAt(tick, script))
                 {
+                    // Keep a pending auto bake_end: the block may start on the next tick.
                     if (!ReferenceEquals(StatusText, StatusLive))
                     {
                         StatusText = StatusLive;
@@ -579,7 +943,30 @@ namespace UltrakillTAS
                 }
             }
 
+            // The resume landed in a bake block: close it when the sync window ends. Its
+            // scripted range is remembered so the rest of the block plays live.
+            if (_resumeBakeEndPending)
+            {
+                _resumeBakeEndPending = false;
+                // The resume must land in the block, or the block must start on the tick the
+                // resume begins at (a bake_start immediately after the norefresh marker).
+                if (_active != null && _active.StartTick <= _resumeBakeEndResumeTick + 1 &&
+                    _resumeBakeEndResumeTick < _active.EndTick)
+                {
+                    int autoEnd = Math.Min(_active.EndTick, _resumeBakeEndTick);
+                    if (autoEnd < _active.EndTick)
+                    {
+                        _resumeBakeEndBlock = autoEnd;
+                        _plugin.LogInfo("Bake: norefresh auto bake_end will close block '" +
+                                        _active.FileName + "' after tick " + (autoEnd - 1) + ".");
+                    }
+                }
+                if (_resumeBakeEndBlock <= 0)
+                    CancelNorefreshBakeEnd();
+            }
+
             TasBakeBlock block = _active;
+            int blockEnd = _resumeBakeEndBlock > 0 ? _resumeBakeEndBlock : block.EndTick;
             int index = tick - block.StartTick;
             try
             {
@@ -588,11 +975,11 @@ namespace UltrakillTAS
                 if (_recording)
                 {
                     EnsurePlayer();
-                    RecordTick(tick, engine.CurrentTime);
+                    RecordTick(tick, engine.CurrentTime, block.ExcludeMapElements);
                 }
                 else if (_activeData != null)
                 {
-                    BakeBlockMode mode = EnableBakedPlayback.Value
+                    BakeBlockMode mode = EnableBakedPlayback.Value && !PureInputOnly
                         ? BakeBlockMode.Enforced
                         : VerifyRawPlayback.Value ? BakeBlockMode.Verify : BakeBlockMode.Live;
                     SetMode(mode);
@@ -629,8 +1016,8 @@ namespace UltrakillTAS
                 _plugin.LogWarning("Bake: tick " + tick + " of block '" + block.FileName + "' failed: " + ex.Message);
             }
 
-            if (tick == block.EndTick - 1)
-                FinishBlock();
+            if (tick == blockEnd - 1)
+                FinishBlock(_resumeBakeEndBlock > 0 && _resumeBakeEndBlock < block.EndTick);
         }
 
         /// <summary>Start of a block at <paramref name="tick"/> (its first tick, or mid-block after a jump).</summary>
@@ -660,11 +1047,12 @@ namespace UltrakillTAS
             {
                 // The mode is decided per tick: baked playback may be switched at any time.
                 DetailText = "block '" + found.FileName + "' (ticks " + found.StartTick + "-" + (found.EndTick - 1) +
-                             "): valid bake loaded";
+                             "): valid bake loaded" + (found.ExcludeMapElements ? " [NME]" : string.Empty);
                 // A loaded bake was silent in the log, so "the bake is not used" could not be told
                 // apart from "baked playback is off". Logged once per block entry, not per tick.
                 _plugin.LogInfo("Bake: block '" + found.FileName + "' entered at tick " + tick + " with a valid bake (" +
-                                Path.GetFileName(_activeData.Path) + ", " + _activeData.TickCount + " ticks); " +
+                                Path.GetFileName(_activeData.Path) + ", " + _activeData.TickCount + " ticks" +
+                                (found.ExcludeMapElements ? ", NME: doors/rooms excluded" : string.Empty) + "); " +
                                 (EnableBakedPlayback.Value
                                     ? "Enable Baked Playback is ON: baked state is applied every tick."
                                     : "Enable Baked Playback is OFF: the block plays live input only.") +
@@ -693,19 +1081,33 @@ namespace UltrakillTAS
             // Submission guard: the .ukbake may be saved, but a run that is baking is not submitted as legit.
             s_runRecordedBake = true;
             SetMode(BakeBlockMode.Record);
-            DetailText = "block '" + found.FileName + "': recording " + found.TickCount + " ticks";
+            DetailText = "block '" + found.FileName + "': recording " + found.TickCount + " ticks" +
+                         (found.ExcludeMapElements ? " (non-map elements)" : string.Empty);
             _plugin.LogInfo("Bake: recording block '" + found.FileName + "' (ticks " + found.StartTick + "-" +
-                            (found.EndTick - 1) + ").");
+                            (found.EndTick - 1) + ")" +
+                            (found.ExcludeMapElements ? "; non-map elements only: doors and streamed rooms are excluded" : string.Empty) +
+                            ".");
             return true;
         }
 
-        void FinishBlock()
+        void FinishBlock(bool autoEnded = false)
         {
             TasBakeBlock block = _active;
+            if (autoEnded)
+            {
+                _autoEndedBlockStart = block.StartTick;
+                _autoEndedBlockEnd = block.EndTick;
+            }
             if (_recording)
             {
                 _recording = false;
-                if (_recOffsets.Count == block.TickCount)
+                if (autoEnded)
+                {
+                    _plugin.LogInfo("Bake: auto bake_end after the norefresh resume; block '" +
+                                    block.FileName + "' recording discarded (" + _recOffsets.Count + " of " +
+                                    block.TickCount + " ticks).");
+                }
+                else if (_recOffsets.Count == block.TickCount)
                 {
                     BakeBlockData data = new BakeBlockData
                     {
@@ -747,6 +1149,9 @@ namespace UltrakillTAS
                 if (_recBuffer.Capacity > (8 << 20))
                     _recBuffer.Capacity = 1 << 20;
             }
+            if (autoEnded)
+                _plugin.Toast("Auto bake_end after norefresh resume: block '" + block.FileName + "' ended.", false);
+            CancelNorefreshBakeEnd();
             LogCorrections(block, true);
             _active = null;
             _activeData = null;
@@ -797,6 +1202,10 @@ namespace UltrakillTAS
                 return null;
             }
             data = Load(path, block.Hash, out reason);
+            // Existing sidecars recorded before fist selection left the bake hash: accept the
+            // old hash when the block carries the fist header that produced it.
+            if (data == null && !string.IsNullOrEmpty(block.LegacyHash))
+                data = Load(path, block.LegacyHash, out reason);
             if (data == null || data.TickCount != block.TickCount || !Decode(data, out reason))
             {
                 if (data != null && data.TickCount != block.TickCount)
@@ -807,6 +1216,7 @@ namespace UltrakillTAS
                 return null;
             }
             data.StartTick = block.StartTick;
+            data.Hash = block.Hash;
             if (data.Version < SystemRngFormatVersion)
                 _plugin.LogWarning("Bake: " + Path.GetFileName(path) + " is format " + data.Version +
                                    " and only carries UnityEngine.Random: the System.Random seed stream is not applied " +
@@ -823,6 +1233,10 @@ namespace UltrakillTAS
 
         void TrySkip(TasEngine engine, TasScript script)
         {
+            // A pure-input run is testing its own physics: applying a baked frame here would
+            // teleport the player exactly like the override this guard exists to prevent.
+            if (PureInputOnly)
+                return;
             IList<TasBakeBlock> blocks = script.BakeBlocks;
             // A chain of baked blocks back to back is skipped in one frame.
             for (int guard = 0; guard < blocks.Count; guard++)
@@ -1101,7 +1515,7 @@ namespace UltrakillTAS
         // Frame encoding
         // ------------------------------------------------------------------
 
-        void RecordTick(int tick, double time)
+        void RecordTick(int tick, double time, bool excludeMapElements)
         {
             BinaryWriter w = _recWriter;
             _recOffsets.Add((int)_recBuffer.Position);
@@ -1113,7 +1527,7 @@ namespace UltrakillTAS
             CollectProjectiles();
             WriteProjectiles(w);
             WriteEnemies(w);
-            WriteDoors(w);
+            WriteMapElements(w, !excludeMapElements);
         }
 
         /// <summary>Bit of a projectile type in a type mask (types 31 and above share bit 31).</summary>
@@ -2361,7 +2775,7 @@ namespace UltrakillTAS
         }
 
         // ------------------------------------------------------------------
-        // E. Doors and rooms
+        // E. Map elements (doors and their streamed rooms)
         // ------------------------------------------------------------------
 
         bool _doorsCached;
@@ -2435,8 +2849,16 @@ namespace UltrakillTAS
             return sb.ToString();
         }
 
-        void WriteDoors(BinaryWriter w)
+        void WriteMapElements(BinaryWriter w, bool includeMapElements)
         {
+            if (!includeMapElements)
+            {
+                // bake_start_nme: map elements remain live and are not part of the bake.
+                // The decoder still reads the two counts, so write them as empty ranges.
+                w.Write(0);
+                w.Write(0);
+                return;
+            }
             EnsureDoors();
             w.Write(_doors.Length);
             for (int i = 0; i < _doors.Length; i++)
@@ -2467,8 +2889,11 @@ namespace UltrakillTAS
             }
         }
 
-        void ApplyDoors(BakeBlockData data, ref TickBakeFrame f)
+        void ApplyMapElements(BakeBlockData data, ref TickBakeFrame f)
         {
+            // NME frames (and maps without doors) carry empty ranges: do not even scan the map.
+            if (f.DoorCount == 0 && f.RoomCount == 0)
+                return;
             EnsureDoors();
             byte[] doorFlags = data.DoorFlags;
             int doors = Math.Min(f.DoorCount, _doors.Length);
@@ -2530,20 +2955,26 @@ namespace UltrakillTAS
 
         /// <summary>
         /// Writes frame <paramref name="index"/> of a decoded block over the game: RNG, player,
-        /// enemies, projectiles (when their keys were followed) and doors/rooms. Allocation-free.
+        /// enemies, projectiles (when their keys were followed), and map elements when the bake has
+        /// them. Allocation-free.
         /// Every value that had to be written is counted in the per-tick correction counters.
         /// <paramref name="enforcedTick"/>: an enforced playback tick (projectiles applied, the
         /// advanced correction threshold used); false for skip-to-end, which always snaps.
+        /// <paramref name="exact"/>: the temporary norefresh sync bake: ignore CorrectionThreshold.
         /// </summary>
-        void ApplyFrame(BakeBlockData data, int index, bool enforcedTick)
+        void ApplyFrame(BakeBlockData data, int index, bool enforcedTick, bool exact = false)
         {
             // Submission guard: from here on this run carries baked state (enforced or skip-to-end).
             s_runAppliedBakedState = true;
-            float threshold = enforcedTick && CorrectionThreshold != null ? CorrectionThreshold.Value : 0f;
+            float threshold = enforcedTick && !exact && CorrectionThreshold != null ? CorrectionThreshold.Value : 0f;
             // 0 (the default) = snap: only float noise below ApplyEpsilonSq is left alone.
-            _thresholdSq = threshold > 0f && !float.IsInfinity(threshold) && threshold * threshold > ApplyEpsilonSq
-                ? threshold * threshold
-                : ApplyEpsilonSq;
+            // The norefresh sync bake asks for exact, which makes every difference a write.
+            if (exact)
+                _thresholdSq = 0f;
+            else
+                _thresholdSq = threshold > 0f && !float.IsInfinity(threshold) && threshold * threshold > ApplyEpsilonSq
+                    ? threshold * threshold
+                    : ApplyEpsilonSq;
             ref TickBakeFrame f = ref data.Frames[index];
             if (!_rngBroken)
             {
@@ -2570,7 +3001,7 @@ namespace UltrakillTAS
             // Skip-to-end: projectile keys cannot be followed through ticks that never ran.
             if (enforcedTick)
                 ApplyProjectiles(data, ref f);
-            ApplyDoors(data, ref f);
+            ApplyMapElements(data, ref f);
         }
 
         /// <summary>

@@ -60,8 +60,8 @@ namespace UltrakillTAS
             "harmless", "lenient", "standard", "violent", "brutal", "knuckleblaster", "parry");
 
         static readonly HashSet<string> SpecialWords = Set(
-            "save", "seed", "target_yaw", "norefresh", "ff", "fff", "change", "look_at", "yaw", "pitch", "to", "over",
-            "bake_start", "bake_end", "record_video", "record_video_stop");
+            "save", "seed", "target_yaw", "fist", "norefresh", "ff", "fff", "change", "look_at", "yaw", "pitch",
+            "to", "over", "bake_start", "bake_start_nme", "bake_end", "record_video", "record_video_stop");
 
         static readonly HashSet<string> Modifiers = Set("once", "left", "right", "middle", "lmb", "rmb", "mmb");
 

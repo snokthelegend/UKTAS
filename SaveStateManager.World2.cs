@@ -41,21 +41,6 @@ namespace UltrakillTAS
         }
 
         /// <summary>
-        /// Random seed and run state of a playing particle system. Systems older than the
-        /// core re-simulation window keep their seed and play state instead of being
-        /// simulated back to their saved age, which is what keeps old smoke and blood from
-        /// re-rolling its randomness after a load.
-        /// </summary>
-        sealed class ParticleSeedState
-        {
-            public ParticleSystem System;
-            public uint RandomSeed;
-            public bool Playing;
-            public bool Paused;
-            public float Time;
-        }
-
-        /// <summary>
         /// One ground gasoline stain from the Firestarter Rocket Launcher's alternate fire.
         /// The stain persists until it is ignited, so it is gameplay state, not decoration:
         /// it makes the floor slippery and is the fuel a later explosion lights. The runtime
@@ -81,8 +66,11 @@ namespace UltrakillTAS
         {
             public List<JointModuleState> Joints = new List<JointModuleState>();
             public List<PropBodyState> Props = new List<PropBodyState>();
-            public List<ParticleSeedState> Particles = new List<ParticleSeedState>();
+            public List<ParticleSnapshot> Particles = new List<ParticleSnapshot>();
             public List<GasolineStainState> Gasoline = new List<GasolineStainState>();
+            /// <summary>Fire propagation queues owned by StainVoxelManager, not by a stain.</summary>
+            public List<Vector3Int> PendingIgnitions;
+            public List<Vector3Int> ExplodedVoxels;
         }
 
         partial void CaptureWorld2(Savestate state)
@@ -154,28 +142,30 @@ namespace UltrakillTAS
             if (world.Props.Count >= MaxProps)
                 NoteCap("dynamic physics props", MaxProps);
 
-            // Seeds are skipped in a light rolling-history snapshot (the per-tick walk over
-            // every emitter is the expensive part); slot saves always carry them.
+            // World emitters are captured here; player and enemy emitters are already owned by
+            // their own captures and are skipped so a slot does not store the same buffers twice.
+            // Light history skips this pass entirely: the per-tick walk over every emitter is
+            // the expensive part, and a light state never takes live particle buffers.
             if (!_lightCapture)
             {
                 UnityEngine.Object[] particles;
                 try { particles = UnityEngine.Object.FindObjectsOfType(typeof(ParticleSystem)); }
                 catch { particles = new UnityEngine.Object[0]; }
+                Transform playerTransform = _bridge.PlayerTransform;
                 for (int i = 0; i < particles.Length && world.Particles.Count < MaxParticleSeeds; i++)
                 {
                     ParticleSystem system = particles[i] as ParticleSystem;
-                    if (system == null || !system.isPlaying || IsTemplateClone(system.gameObject))
+                    if (system == null || IsTemplateClone(system.gameObject))
+                        continue;
+                    if (playerTransform != null && system.transform.IsChildOf(playerTransform))
+                        continue;
+                    if (IsUnderEnemy(system.transform))
                         continue;
                     try
                     {
-                        world.Particles.Add(new ParticleSeedState
-                        {
-                            System = system,
-                            RandomSeed = system.randomSeed,
-                            Playing = true,
-                            Paused = system.isPaused,
-                            Time = system.time
-                        });
+                        ParticleSnapshot snapshot = CaptureParticle(system, true);
+                        if (snapshot != null)
+                            world.Particles.Add(snapshot);
                     }
                     catch
                     {
@@ -189,6 +179,8 @@ namespace UltrakillTAS
             // in-flight GasolineProjectile and from the FireZone that appears once lit.
             try { CaptureGasolineStains(state, world); }
             catch (Exception ex) { state.Warnings.Add("gasoline: " + ex.Message); }
+            try { CaptureStainVoxelQueue(world); }
+            catch (Exception ex) { state.Warnings.Add("stain voxel queue: " + ex.Message); }
 
             SetExt(state, "World2", world);
         }
@@ -249,44 +241,16 @@ namespace UltrakillTAS
                 }
             }
 
-            for (int i = 0; i < world.Particles.Count; i++)
+            if (world.Particles.Count > 0)
             {
-                ParticleSeedState particle = world.Particles[i];
-                if (particle == null)
-                    continue;
-                ParticleSystem system = particle.System;
-                if (system == null || !GameBridge.IsAlive(system) || !system.gameObject.activeInHierarchy)
-                    continue;
-                try
-                {
-                    system.useAutoRandomSeed = false;
-                    system.randomSeed = particle.RandomSeed;
-                    if (particle.Time > MaxParticleResimulate)
-                    {
-                        if (particle.Playing)
-                        {
-                            if (!system.isPlaying)
-                                system.Play(false);
-                            if (particle.Paused && !system.isPaused)
-                                system.Pause(false);
-                            else if (!particle.Paused && system.isPaused)
-                                system.Play(false);
-                        }
-                        else if (system.isPlaying)
-                        {
-                            system.Stop(false, ParticleSystemStopBehavior.StopEmitting);
-                        }
-                    }
-                    restored++;
-                }
-                catch (Exception ex)
-                {
-                    _plugin.LogWarning("Particle seed restore skipped: " + ex.Message);
-                }
+                RestoreParticles(world.Particles);
+                restored += world.Particles.Count;
             }
 
             try { RestoreGasolineStains(world, ref restored, ref missing); }
             catch (Exception ex) { _plugin.LogWarning("Gasoline stain restore skipped: " + ex.Message); }
+            try { RestoreStainVoxelQueue(world); }
+            catch (Exception ex) { _plugin.LogWarning("Stain voxel queue restore skipped: " + ex.Message); }
         }
 
         // ------------------------------------------------------------------
@@ -350,6 +314,62 @@ namespace UltrakillTAS
             }
             if (world.Gasoline.Count >= MaxGasolineStains)
                 NoteCap("gasoline stains", MaxGasolineStains);
+        }
+
+        /// <summary>
+        /// The voxel manager derives its stain map from the restored stains, but two plain
+        /// sets drive the next propagation tick: pending ignitions and the explosion guard.
+        /// They are copied by value; the voxel map itself is rebuilt by AttachTo.
+        /// </summary>
+        void CaptureStainVoxelQueue(World2ModuleState world)
+        {
+            Type managerType = _bridge.FindType("StainVoxelManager");
+            if (managerType == null)
+                return;
+            UnityEngine.Object manager = UnityEngine.Object.FindObjectOfType(managerType);
+            if (manager == null)
+                return;
+            world.PendingIgnitions = CaptureVectorSet(manager, managerType, "pendingIgnitions");
+            world.ExplodedVoxels = CaptureVectorSet(manager, managerType, "explodedVoxels");
+        }
+
+        static List<Vector3Int> CaptureVectorSet(object owner, Type ownerType, string fieldName)
+        {
+            FieldInfo field = NamedField(ownerType, fieldName);
+            if (field == null)
+                return null;
+            HashSet<Vector3Int> values = field.GetValue(owner) as HashSet<Vector3Int>;
+            return values != null ? new List<Vector3Int>(values) : null;
+        }
+
+        void RestoreStainVoxelQueue(World2ModuleState world)
+        {
+            if ((world.PendingIgnitions == null || world.PendingIgnitions.Count == 0) &&
+                (world.ExplodedVoxels == null || world.ExplodedVoxels.Count == 0))
+                return;
+            Type managerType = _bridge.FindType("StainVoxelManager");
+            if (managerType == null)
+                return;
+            UnityEngine.Object manager = UnityEngine.Object.FindObjectOfType(managerType);
+            if (manager == null)
+                return;
+            RestoreVectorSet(manager, managerType, "pendingIgnitions", world.PendingIgnitions);
+            RestoreVectorSet(manager, managerType, "explodedVoxels", world.ExplodedVoxels);
+        }
+
+        static void RestoreVectorSet(object owner, Type ownerType, string fieldName, List<Vector3Int> values)
+        {
+            FieldInfo field = NamedField(ownerType, fieldName);
+            if (field == null)
+                return;
+            HashSet<Vector3Int> set = field.GetValue(owner) as HashSet<Vector3Int>;
+            if (set == null)
+                return;
+            set.Clear();
+            if (values == null)
+                return;
+            for (int i = 0; i < values.Count; i++)
+                set.Add(values[i]);
         }
 
         static List<FieldState> CaptureGasolineFields(Component stain)
@@ -538,7 +558,8 @@ namespace UltrakillTAS
         }
 
         /// <summary>
-        /// Re-run GasolineStain.AttachTo(Collider, bool) on a rebuilt stain. `parent` is the
+        /// Re-run GasolineStain.AttachTo on a rebuilt stain. Current ULTRAKILL exposes
+        /// AttachTo(Collider); older builds had AttachTo(Collider, bool). `parent` is the
         /// surface transform saved from the original attachment, and the hit collider lives
         /// on exactly that transform, so its own Collider is the one to pass.
         /// </summary>
@@ -559,11 +580,17 @@ namespace UltrakillTAS
                     if (method.Name != "AttachTo")
                         continue;
                     ParameterInfo[] parameters = method.GetParameters();
-                    if (parameters.Length != 2 || parameters[0].ParameterType != typeof(Collider) ||
-                        parameters[1].ParameterType != typeof(bool))
-                        continue;
-                    method.Invoke(stain, new object[] { surface, false });
-                    return true;
+                    if (parameters.Length == 1 && parameters[0].ParameterType == typeof(Collider))
+                    {
+                        method.Invoke(stain, new object[] { surface });
+                        return true;
+                    }
+                    if (parameters.Length == 2 && parameters[0].ParameterType == typeof(Collider) &&
+                        parameters[1].ParameterType == typeof(bool))
+                    {
+                        method.Invoke(stain, new object[] { surface, false });
+                        return true;
+                    }
                 }
             }
             catch

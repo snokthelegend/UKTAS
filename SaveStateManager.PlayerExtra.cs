@@ -102,9 +102,24 @@ namespace UltrakillTAS
                     // A parent move must not be fought by the rigidbody for one step.
                     if (parentChanged || extra.IsKinematic)
                         body.isKinematic = extra.IsKinematic;
-                    if (!body.isKinematic)
+                    if (_playerLoadHeld)
+                    {
+                        // The parent/world pose restore must not unfreeze the load hold.
+                        if (!body.isKinematic)
+                        {
+                            body.velocity = Vector3.zero;
+                            body.angularVelocity = Vector3.zero;
+                        }
+                        body.isKinematic = true;
+                    }
+                    else if (!body.isKinematic)
                         body.WakeUp();
                 }
+                // Parenting moves the player; nothing here may undo the slide the restore put
+                // back. Re-apply the saved slide fields after the hierarchy work so an active
+                // slide (sliding, crouching, slideDir) survives into the first resumed tick.
+                if (state.Player != null)
+                    ApplyNamedFields(player, state.Player.SlideFields);
                 restored++;
             }
             catch (Exception ex)

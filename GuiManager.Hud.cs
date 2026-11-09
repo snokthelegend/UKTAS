@@ -583,19 +583,50 @@ namespace UltrakillTAS
             {
                 float pitch;
                 float yaw;
-                _cachedHudLines.Add(_bridge.TryGetCameraAngles(out pitch, out yaw)
+                bool haveAngles;
+                Vector3 freecamPosition;
+                Quaternion freecamRotation;
+                bool freecam = _plugin.TryGetFreecamPose(out freecamPosition, out freecamRotation);
+                if (freecam)
+                {
+                    // Freecam is render-only: the game camera keeps V1's pose, so the panel
+                    // reads the fly camera's own orientation while it is flying.
+                    float eulerPitch = freecamRotation.eulerAngles.x;
+                    if (eulerPitch > 180f)
+                        eulerPitch -= 360f;
+                    pitch = Mathf.Clamp(eulerPitch, -89.9f, 89.9f);
+                    yaw = freecamRotation.eulerAngles.y;
+                    haveAngles = true;
+                }
+                else
+                {
+                    haveAngles = _bridge.TryGetCameraAngles(out pitch, out yaw);
+                    if (!haveAngles)
+                    {
+                        pitch = 0f;
+                        yaw = 0f;
+                    }
+                }
+
+                _cachedHudLines.Add(haveAngles
                     ? "pitch " + Num(pitch) + "  yaw " + NumYaw(yaw)
                     : "angles n/a");
 
-                // Optimizer aid: which world axis the camera looks along, plus origin.
+                // Optimizer aid: which world axis the view looks along, plus V1's origin. The
+                // axis follows the freecam while it is flying.
                 Vector3 facingOrigin;
-                Camera facingCamera = Camera.main;
-                if (facingCamera != null && _bridge.TryGetPlayerPosition(out facingOrigin))
+                if (haveAngles && _bridge.TryGetPlayerPosition(out facingOrigin))
                 {
-                    float facingPitch;
-                    float facingYaw;
-                    if (_bridge.TryGetCameraAngles(out facingPitch, out facingYaw))
-                        _cachedHudLines.Add(TasOptimizer.FacingText(facingCamera.transform.forward, facingOrigin, facingYaw, facingPitch));
+                    if (freecam)
+                    {
+                        _cachedHudLines.Add(TasOptimizer.FacingText(freecamRotation * Vector3.forward, facingOrigin, yaw, pitch));
+                    }
+                    else
+                    {
+                        Camera facingCamera = Camera.main;
+                        if (facingCamera != null)
+                            _cachedHudLines.Add(TasOptimizer.FacingText(facingCamera.transform.forward, facingOrigin, yaw, pitch));
+                    }
                 }
             }
 
@@ -748,20 +779,36 @@ namespace UltrakillTAS
         readonly RaycastHit[] _crosshairHits = new RaycastHit[32];
 
         /// <summary>
-        /// The nearest solid surface on the camera's forward ray: Physics.Raycast over every
-        /// layer, trigger volumes ignored, the player's own colliders skipped. False when the
-        /// ray hits nothing within HitRange or there is no camera.
+        /// The nearest solid surface on the active view's forward ray (the freecam's while it is
+        /// flying): Physics.Raycast over every layer, trigger volumes ignored, the player's own
+        /// colliders skipped. False when the ray hits nothing within HitRange or there is no view.
         /// </summary>
         bool TryCrosshairHit(out Vector3 point)
         {
             point = Vector3.zero;
-            Transform camera;
-            if (!_bridge.TryGetCameraTransform(out camera) || camera == null)
-                return false;
+            Vector3 origin;
+            Vector3 direction;
+            Vector3 freecamPosition;
+            Quaternion freecamRotation;
+            if (_plugin.TryGetFreecamPose(out freecamPosition, out freecamRotation))
+            {
+                // Freecam never moves the game camera (InputPatcher.TryGetFreecamPose), so the
+                // hit line raycasts from the fly camera's pose instead of V1's.
+                origin = freecamPosition;
+                direction = freecamRotation * Vector3.forward;
+            }
+            else
+            {
+                Transform camera;
+                if (!_bridge.TryGetCameraTransform(out camera) || camera == null)
+                    return false;
+                origin = camera.position;
+                direction = camera.forward;
+            }
             Transform player = _bridge.PlayerTransform;
             try
             {
-                int count = Physics.RaycastNonAlloc(camera.position, camera.forward, _crosshairHits, HitRange,
+                int count = Physics.RaycastNonAlloc(origin, direction, _crosshairHits, HitRange,
                                                     ~0, QueryTriggerInteraction.Ignore);
                 float nearest = float.MaxValue;
                 bool found = false;
@@ -1116,12 +1163,13 @@ namespace UltrakillTAS
             return 0;
         }
 
+        // The value is drawn on the slider itself (see SlideFormat), so these rows no longer need a
+        // separate number column: the track gets that width back.
         void SliderRow(string label, BepInEx.Configuration.ConfigEntry<float> entry, float min, float max, string tip)
         {
             GUILayout.BeginHorizontal();
             Lbl(label, tip, GUILayout.Width(150));
-            float value = Slide(entry.Value, min, max, tip, GUILayout.Width(220));
-            GUILayout.Label(value.ToString("0.00", CultureInfo.InvariantCulture), GUILayout.Width(50));
+            float value = SlideFormat(entry.Value, min, max, tip, "0.00", GUILayout.Width(260));
             GUILayout.EndHorizontal();
             if (Math.Abs(value - entry.Value) > 0.0001f)
                 entry.Value = Mathf.Round(value * 100f) / 100f;
@@ -1131,8 +1179,7 @@ namespace UltrakillTAS
         {
             GUILayout.BeginHorizontal();
             Lbl(label, tip, GUILayout.Width(150));
-            int value = Mathf.RoundToInt(Slide(entry.Value, min, max, tip, GUILayout.Width(220)));
-            GUILayout.Label(value.ToString(CultureInfo.InvariantCulture), GUILayout.Width(50));
+            int value = Mathf.RoundToInt(SlideFormat(entry.Value, min, max, tip, "0", GUILayout.Width(260)));
             GUILayout.EndHorizontal();
             if (value != entry.Value)
                 entry.Value = value;
@@ -1242,6 +1289,73 @@ namespace UltrakillTAS
             _plugin.HudShowPointer.Value = Tog(_plugin.HudShowPointer.Value,
                 "Pointer row (mouse position in pixels and fractions, for menu scripts)",
                 "Shows where the mouse is, ready to copy into mouse / mousef commands.");
+            EndCard();
+
+            BeginCard("Performance rendering");
+            bool perfMode = _plugin.PerformanceRenderMode.Value;
+            bool perfWant = Tog(perfMode, "Performance Render Mode (Max FPS)",
+                "Strip GPU-only rendering during playback: real-time shadows, post-processing/CRT output, cosmetic particles, decals and engine quality. Only the visual presentation changes; colliders, triggers, rigidbodies, joints, physics layer assignments, physics timing and every gameplay Update/FixedUpdate are untouched. Decals use source-level suppression and Decal-layer culling; enemy, limb and gib layers are never culled.");
+            if (perfWant != perfMode)
+            {
+                _plugin.PerformanceRenderMode.Value = perfWant;
+                if (_plugin.PerfRendering != null)
+                    _plugin.PerfRendering.RequestRefresh();
+            }
+            if (perfWant)
+            {
+                bool shadows = _plugin.PerfDisableShadows.Value;
+                bool post = _plugin.PerfDisablePostProcessing.Value;
+                bool particles = _plugin.PerfDisableCosmeticParticles.Value;
+                bool allParticles = _plugin.PerfSuppressAllParticles.Value;
+                bool decals = _plugin.PerfDisableDecals.Value;
+                bool pixelLights = _plugin.PerfDisablePixelLights.Value;
+                bool fullbright = _plugin.PerfFullbright.Value;
+                bool fastSkinning = _plugin.PerfFastSkinning.Value;
+                bool particleRaycasts = _plugin.PerfZeroParticleRaycasts.Value;
+
+                bool shadowsNew = Tog(shadows, "Disable Dynamic Shadows & Reflection Probes",
+                    "QualitySettings.shadows becomes Disable and reflection probes are switched off. Scanned once on activation or scene load, never on a timer. Light objects, intensity, geometry and gameplay layers stay enabled.");
+                bool postNew = Tog(post, "Disable Post-Processing & CRT Shaders",
+                    "Hide ULTRAKILL's virtual-camera post-process quad and copy its final color buffer straight to the screen. The handler stays enabled so camera and level-restart rendering keep working. Camera clear flags and gameplay layers stay as they are.");
+                bool particlesNew = Tog(particles, "Suppress Cosmetic Particles (Blood, Dust, Sparks)",
+                    "Cull the dedicated Particles layer from Camera.main and skip ULTRAKILL's blood/decal visual spawn methods. Particle systems still simulate and collision callbacks still run.");
+                bool allParticlesNew = Tog(allParticles, "Suppress All Particle Rendering (Weapons, Projectiles, Explosions)",
+                    "Hide every ParticleSystemRenderer, including weapon, projectile and explosion effects. Particles still simulate and particle collision callbacks still run; only their visual output is hidden. New effects are picked up by a periodic scan.");
+                bool decalsNew = Tog(decals, "Disable Decals & Bullet Holes",
+                    "Cull only the Decal layer and stop the blood/oil stain pass at the source. Enemy, limb and gib layers are never culled.");
+                bool pixelLightsNew = Tog(pixelLights, "Disable Pixel Lights (Cut Draw Calls)",
+                    "QualitySettings.pixelLightCount = 0, removing extra forward-lighting passes per mesh. The original value is restored when the mode or this option is switched off.");
+                bool fullbrightNew = Tog(fullbright, "Fullbright (Disable All Lighting)",
+                    "Disable every scene light and use flat white ambient light. Visual only; colliders, triggers, physics and gameplay scripts are untouched. Lights and RenderSettings are restored when this option is switched off.");
+                bool fastSkinningNew = Tog(fastSkinning, "Fast Enemy Mesh Skinning (1-Bone)",
+                    "Sets enemy SkinnedMeshRenderer.quality to Bone1 and QualitySettings.skinWeights to OneBone. Animation state and gameplay logic do not change; per-renderer quality is restored on exit.");
+                bool particleRaycastsNew = Tog(particleRaycasts, "Zero Particle Raycast Budget",
+                    "QualitySettings.particleRaycastBudget = 0 so cosmetic particle systems stop firing physics raycasts. The original budget is restored on exit.");
+
+                _plugin.PerfDisableShadows.Value = shadowsNew;
+                _plugin.PerfDisablePostProcessing.Value = postNew;
+                _plugin.PerfDisableCosmeticParticles.Value = particlesNew;
+                _plugin.PerfSuppressAllParticles.Value = allParticlesNew;
+                _plugin.PerfDisableDecals.Value = decalsNew;
+                _plugin.PerfDisablePixelLights.Value = pixelLightsNew;
+                _plugin.PerfFullbright.Value = fullbrightNew;
+                _plugin.PerfFastSkinning.Value = fastSkinningNew;
+                _plugin.PerfZeroParticleRaycasts.Value = particleRaycastsNew;
+                if (shadowsNew != shadows || postNew != post || particlesNew != particles ||
+                    allParticlesNew != allParticles || decalsNew != decals || pixelLightsNew != pixelLights ||
+                    fullbrightNew != fullbright || fastSkinningNew != fastSkinning || particleRaycastsNew != particleRaycasts)
+                {
+                    if (_plugin.PerfRendering != null)
+                        _plugin.PerfRendering.RequestRefresh();
+                }
+                Hint("Rendering only: colliders, triggers, rigidbodies, joints, physics layer assignments, Time.fixedDeltaTime and Physics.autoSimulation are never touched.");
+                Hint("Post-processing is bypassed at the output material; the handler stays alive so restarts keep rendering. Decals use only the Decal layer plus the blood/oil pass.");
+                Hint("Engine quality also disables MSAA and anisotropic filtering while the master mode is on. Every cached QualitySettings value is restored exactly when it is switched off.");
+            }
+            else
+            {
+                Hint("Off: the full visual pipeline is used. Physics and game logic behave identically in either state.");
+            }
             EndCard();
 
             BeginCard("HUD layout");

@@ -23,10 +23,11 @@ namespace UltrakillTAS
     /// Time.fixedDeltaTime stays at ULTRAKILL's native 0.008 s, so 0.016 s ticks run
     /// two native steps and 0.25 s ticks run ~31 through Unity's own fixed accumulator.
     ///
-    /// Time scale: the tool never writes Time.timeScale; it only reads it. ULTRAKILL
-    /// owns the scale (hitstop/parry stops, impact frames, the weapon wheel, cutscene
-    /// slow motion, the assist speed slider, its pause menu), so a tick advances
-    /// frametime x the game's current scale of game time.
+    /// Time scale: outside a savestate load the tool never writes Time.timeScale; it only
+    /// reads it. ULTRAKILL owns the scale (hitstop/parry stops, impact frames, the weapon
+    /// wheel, cutscene slow motion, the assist speed slider, its pause menu), so a tick
+    /// advances frametime x the game's current scale of game time. A load restores the
+    /// captured scale in SaveStateManager.Timing; this clock itself still does not write it.
     ///
     /// Because the scale is not available to freeze a frame, the clock is frame-locked
     /// while it runs: every rendered frame is exactly one tick and the render rate is
@@ -95,6 +96,7 @@ namespace UltrakillTAS
         // Fixed-step phase alignment (see QueueFixedStepAlign).
         bool _alignQueued;
         double _alignDelta;
+        double _alignTarget = PhaseTarget;
         bool _physicsApplied;
         float _savedSleepThreshold;
         bool _savedAutoSync;
@@ -761,10 +763,10 @@ namespace UltrakillTAS
         }
 
         /// <summary>
-        /// A savestate load discards the timeline that owned any hitstop. Time.timeScale
-        /// is the game's and is not touched here (TimeControllerHitstopPatch.Restore ends
-        /// a discarded stop through the game's own ContinueTime); only the physics carry
-        /// is resynced for the restored world.
+        /// A savestate load discards the timeline that owned any hitstop. The saved
+        /// Time.timeScale and hitstop are restored by SaveStateManager.Timing; this method
+        /// only resyncs the physics carry for the restored world. A discarded live stop is
+        /// ended through the game's own ContinueTime by the hitstop patch.
         /// </summary>
         public void ResetHitstop()
         {
@@ -812,12 +814,25 @@ namespace UltrakillTAS
         /// <summary>Discard queued advances and restart the pacing accumulator.</summary>
         public void ClearPendingSteps()
         {
+            ClearPendingSteps(false);
+        }
+
+        /// <summary>
+        /// Discard queued advances. The fixed-step phase is only reset when asked: a norefresh
+        /// resume has just restored the saved sub-step phase (SaveStateManager.PostRestore), and
+        /// zeroing it there would step the clock at a different tick than continuous playback.
+        /// </summary>
+        public void ClearPendingSteps(bool keepPhysicsAccumulator)
+        {
             PendingSteps = 0;
             _realAccumulator = 0.0;
             _advanceScheduled = false;
-            _physicsAccumulator = 0.0;
-            _lastBulkSteps = 0;
-            LastTickSteps = 0;
+            if (!keepPhysicsAccumulator)
+            {
+                _physicsAccumulator = 0.0;
+                _lastBulkSteps = 0;
+                LastTickSteps = 0;
+            }
         }
 
         /// <summary>Queue frame advances while paused. One step = one tick = one rendered frame.</summary>
@@ -1030,7 +1045,9 @@ namespace UltrakillTAS
 
             // An alignment frame needs the game at scale 1; it waits until the hitstop is over.
             bool aligning = false;
-            if (_alignQueued && !hitstopHolding)
+            // Not while the game's own scale is 0 (pause menu): that frame advances nothing, and
+            // consuming the queue would run the deferred restore on the wrong sub-step phase.
+            if (_alignQueued && !hitstopHolding && !GamePaused)
             {
                 // One real frame that advances Unity's clock by the alignment delta (a physics
                 // step lands in it at most once), then the clock resumes next frame. The
@@ -1038,6 +1055,12 @@ namespace UltrakillTAS
                 _alignQueued = false;
                 aligning = true;
                 Time.captureDeltaTime = (float)_alignDelta;
+                // This frame spends the delta in Unity's own accumulator, so from here on the
+                // real phase IS the target: record it in the model (and in any state restored
+                // right after this frame) instead of leaving the old remainder there.
+                _physicsAccumulator = _alignTarget;
+                _lastBulkSteps = 0;
+                LastTickSteps = 0;
             }
 
             // A non-tick frame runs on the frozen player loop (SimulationFreeze): no time
@@ -1198,6 +1221,16 @@ namespace UltrakillTAS
         public const double PhaseTarget = 0.0001;
 
         /// <summary>
+        /// An align advance below this is raised by a whole step: Unity clamps a frame's delta up
+        /// to about 10 microseconds, so a smaller advance would land short of the target.
+        /// </summary>
+        const double MinAlignAdvance = 0.00005;
+
+        /// <summary>True while the align frame queued by QueueFixedStepAlign has not run yet.</summary>
+        public bool AlignmentPending { get { return _alignQueued; } }
+
+
+        /// <summary>
         /// Unity carries the time left over after its last physics step into the next run,
         /// and nothing resets it. With 0.001 s ticks that leftover decides which tick a
         /// physics step lands on, and it shifts by one tick on every run. This measures it
@@ -1208,24 +1241,52 @@ namespace UltrakillTAS
         /// </summary>
         public bool QueueFixedStepAlign()
         {
+            return QueueFixedStepAlign(PhaseTarget);
+        }
+
+        /// <summary>
+        /// The same alignment, to an explicit phase. A state that carries its own sub-step
+        /// phase (a savestate, a norefresh checkpoint) has to be aligned to THAT phase: Unity's
+        /// fixed accumulator cannot be written, so advancing the clock to the state's remainder
+        /// before the restore overwrites the world is the only way to make the restored tick
+        /// step physics on the same boundary as the run that produced the state.
+        /// </summary>
+        public bool QueueFixedStepAlign(double target)
+        {
             double fixedStep = Time.fixedDeltaTime;
             if (fixedStep <= 0.0)
                 return false;
+            if (double.IsNaN(target) || target < 0.0 || target >= fixedStep)
+                target = PhaseTarget;
 
             double remainder = Time.timeAsDouble - Time.fixedTimeAsDouble;
             if (remainder < 0.0)
                 remainder = 0.0;
             if (remainder >= fixedStep)
                 remainder %= fixedStep;
-            if (Math.Abs(remainder - PhaseTarget) < 0.000001)
+            if (Math.Abs(remainder - target) < 0.000001)
+            {
+                // Already on the phase: no frame to spend, but the model must still agree with
+                // Unity's live remainder (Activate zeroes it before this is called).
+                _alignTarget = target;
+                _physicsAccumulator = target;
+                _lastBulkSteps = 0;
+                LastTickSteps = 0;
                 return false;
+            }
 
-            double advance = remainder <= PhaseTarget
-                ? PhaseTarget - remainder
-                : fixedStep - remainder + PhaseTarget;
+            double advance = remainder <= target
+                ? target - remainder
+                : fixedStep - remainder + target;
+            // A whole extra step leaves the remainder unchanged and stays clear of Unity's clamp;
+            // the frame it costs is overwritten by the restore that follows the alignment.
+            if (advance < MinAlignAdvance)
+                advance += fixedStep;
             _alignDelta = advance;
+            _alignTarget = target;
             _alignQueued = true;
-            _plugin.LogInfo("Aligning the physics step phase: remainder " + remainder.ToString("0.000000") +
+            _plugin.LogInfo("Aligning the physics step phase to " + target.ToString("0.000000") +
+                            " s: remainder " + remainder.ToString("0.000000") +
                             " s, advancing " + advance.ToString("0.000000") + " s.");
             return true;
         }

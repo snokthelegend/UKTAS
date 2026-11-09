@@ -85,6 +85,7 @@ namespace UltrakillTAS
     public sealed class ComponentSnapshot
     {
         public Component Component;
+        public string TypeName;
         public bool HasEnabled;
         public bool Enabled;
         public List<FieldState> Fields;
@@ -96,6 +97,14 @@ namespace UltrakillTAS
         public List<InvokeInfo> PendingInvokes;
         /// <summary>Effect fields (slide dust, charge glow) that were empty at capture.</summary>
         public List<FieldInfo> EmptyEffects;
+        /// <summary>Rebuild recipe for a loose component that was destroyed after the save.</summary>
+        public GameObject Template;
+        public bool HasTemplate;
+        public Transform Parent;
+        public Vector3 LocalPosition;
+        public Quaternion LocalRotation;
+        public bool ActiveSelf = true;
+        public bool HasPose;
     }
 
     public sealed class ActiveFlag
@@ -116,6 +125,34 @@ namespace UltrakillTAS
         public bool Playing;
         public bool Paused;
         public float Time;
+        // Full live particle state. The buffer is only filled for slot/branch saves;
+        // rolling-history snapshots keep the cheap seed + play state below.
+        public bool FullState;
+        public uint RandomSeed;
+        public bool UseAutoRandomSeed;
+        public bool Emitting;
+        public bool EmissionEnabled = true;
+        public float SimulationSpeed = 1f;
+        public ParticleSystem.Particle[] Buffer;
+        public int BufferCount;
+        // Module configuration is runtime state too: muzzle flashes change size/speed,
+        // fire changes emission, and a stopped emitter still keeps its future burst setup.
+        public ParticleSystem.MainModule Main;
+        public ParticleSystem.EmissionModule Emission;
+        public ParticleSystem.ShapeModule Shape;
+        public ParticleSystem.VelocityOverLifetimeModule VelocityOverLifetime;
+        public ParticleSystem.NoiseModule Noise;
+        public ParticleSystem.CollisionModule Collision;
+        public ParticleSystem.TrailModule Trails;
+        public ParticleSystem.SubEmittersModule SubEmitters;
+        public ParticleSystem.TextureSheetAnimationModule TextureSheetAnimation;
+        public ParticleSystem.ColorOverLifetimeModule ColorOverLifetime;
+        public ParticleSystem.SizeOverLifetimeModule SizeOverLifetime;
+        public ParticleSystem.RotationOverLifetimeModule RotationOverLifetime;
+        public ParticleSystem.ForceOverLifetimeModule ForceOverLifetime;
+        public ParticleSystem.LimitVelocityOverLifetimeModule LimitVelocity;
+        public ParticleSystem.InheritVelocityModule InheritVelocity;
+        public bool HasModules;
     }
 
     public sealed class AudioSnapshot
@@ -123,8 +160,26 @@ namespace UltrakillTAS
         public AudioSource Source;
         public bool Playing;
         public float Time;
+        public int TimeSamples;
         public float Pitch;
         public float Volume;
+        public bool Mute;
+        public bool Loop;
+        public bool PlayOnAwake;
+        public int Priority;
+        public float PanStereo;
+        public float SpatialBlend;
+        public float ReverbZoneMix;
+        public float DopplerLevel;
+        public float Spread;
+        public AudioRolloffMode RolloffMode;
+        public float MinDistance;
+        public float MaxDistance;
+        public bool IgnoreListenerPause;
+        public bool IgnoreListenerVolume;
+        public AudioVelocityUpdateMode VelocityUpdateMode;
+        public UnityEngine.Audio.AudioMixerGroup OutputAudioMixerGroup;
+        public bool HasOutputAudioMixerGroup;
     }
 
     /// <summary>A map element (trigger, platform, elevator, breakable): active flag, pose, fields.</summary>
@@ -183,18 +238,38 @@ namespace UltrakillTAS
         public int[] StateHashes;
         public float[] NormalizedTimes;
         public float[] LayerWeights;
+        // A state captured in the middle of a transition must not be snapped to the
+        // destination clip: the destination, its remaining blend and its own playback
+        // time are all part of what the player sees and what events fire.
+        public int[] NextStateHashes;
+        public float[] NextNormalizedTimes;
+        public float[] TransitionNormalizedTimes;
+        public float[] TransitionDurations;
+        public bool[] InTransition;
+        public AnimatorUpdateMode UpdateMode = AnimatorUpdateMode.Normal;
+        public AnimatorCullingMode CullingMode = AnimatorCullingMode.AlwaysAnimate;
+        public bool ApplyRootMotion = true;
         public List<AnimatorParameterState> Parameters;
     }
 
-    /// <summary>Only ever created for agents that are active and on the NavMesh.</summary>
+    /// <summary>Agent state, including dormant agents that are not currently on a NavMesh.</summary>
     public sealed class AgentState
     {
         public NavMeshAgent Agent;
+        public bool Enabled;
+        public bool OnNavMesh;
         public Vector3 Position;
         public Vector3 Destination;
         public Vector3 Velocity;
         public bool IsStopped;
         public bool HasPath;
+        public bool PathPending;
+        public NavMeshPathStatus PathStatus;
+        public float RemainingDistance;
+        public NavMeshPath Path;
+        public bool AutoTraverseOffMeshLink;
+        public bool AutoRepath;
+        public int AreaMask;
         public float Speed;
         public float Acceleration;
         public float AngularSpeed;
@@ -202,6 +277,12 @@ namespace UltrakillTAS
         public bool AutoBraking;
         public bool UpdatePosition;
         public bool UpdateRotation;
+        public float Radius;
+        public float Height;
+        public float BaseOffset;
+        public int AvoidancePriority;
+        public ObstacleAvoidanceType ObstacleAvoidanceType;
+        public bool UpdateUpAxis;
     }
 
     public sealed class BodyState
@@ -213,9 +294,71 @@ namespace UltrakillTAS
         public RigidbodyConstraints Constraints;
         public float Drag;
         public float AngularDrag;
+        public float Mass;
+        public Vector3 CenterOfMass;
+        public Vector3 InertiaTensor;
+        public Quaternion InertiaTensorRotation;
+        public RigidbodyInterpolation Interpolation;
+        public CollisionDetectionMode CollisionDetectionMode;
+        public float MaxAngularVelocity;
+        public float MaxDepenetrationVelocity;
+        public float SleepThreshold;
+        public int SolverIterations;
+        public int SolverVelocityIterations;
+        public bool FreezePositionX;
+        public bool FreezePositionY;
+        public bool FreezePositionZ;
+        public bool FreezeRotationX;
+        public bool FreezeRotationY;
+        public bool FreezeRotationZ;
         public bool Sleeping;
         public Vector3 Velocity;
         public Vector3 AngularVelocity;
+    }
+
+    /// <summary>
+    /// NewMovement.gc at capture. Unity's trigger callbacks are what normally keep onGround
+    /// current, and they have not fired for a restored pose, so the flags and the contact list
+    /// both belong to the state.
+    /// </summary>
+    public sealed class GroundContactState
+    {
+        public Component Check;
+        public List<FieldState> Fields;
+        public List<ObjectFieldState> References;
+        public List<ListRefState> ListRefs;
+        public bool HasOnGround;
+        public bool OnGround;
+        public bool HasCanJump;
+        public bool CanJump;
+    }
+
+    /// <summary>
+    /// Lossless wide copy of V1's captured pose and motion. Unity's transforms and
+    /// Rigidbody store floats; widening each component to double keeps the exact value and
+    /// lets the restore write the same bits back without re-deriving or formatting anything.
+    /// </summary>
+    public sealed class PlayerExactState
+    {
+        public bool HasWorldPose;
+        public double PositionX, PositionY, PositionZ;
+        public double RotationX, RotationY, RotationZ, RotationW = 1.0;
+
+        public bool HasLocalPose;
+        public double LocalPositionX, LocalPositionY, LocalPositionZ;
+        public double LocalRotationX, LocalRotationY, LocalRotationZ, LocalRotationW = 1.0;
+        public double LocalScaleX = 1.0, LocalScaleY = 1.0, LocalScaleZ = 1.0;
+
+        public bool HasBodyPose;
+        public double BodyPositionX, BodyPositionY, BodyPositionZ;
+        public double BodyRotationX, BodyRotationY, BodyRotationZ, BodyRotationW = 1.0;
+
+        public bool HasBodyVelocity;
+        public double VelocityX, VelocityY, VelocityZ;
+        public double AngularVelocityX, AngularVelocityY, AngularVelocityZ;
+
+        public bool HasCameraAngles;
+        public double CameraPitch, CameraYaw;
     }
 
     public sealed class PlayerState
@@ -230,6 +373,25 @@ namespace UltrakillTAS
         public Component Movement;
         public Vector3 Position;
         public Quaternion Rotation;
+        /// <summary>The saved local pose, used after PlayerExtra restores the parent chain.</summary>
+        public bool HasLocalPose;
+        public Vector3 LocalPosition;
+        public Quaternion LocalRotation;
+        public Vector3 LocalScale = Vector3.one;
+        /// <summary>Rigidbody pose at capture (it can differ from the transform by interpolation).</summary>
+        public bool HasBodyPose;
+        public Vector3 BodyPosition;
+        public Quaternion BodyRotation;
+        public bool HasCameraAngles;
+        /// <summary>Widened copy of every pose, rotation and velocity value.</summary>
+        public PlayerExactState Exact;
+        // The player capsule's shape at capture. A slide crouches it; a load that leaves the
+        // standing capsule clips geometry the continuous run actually slid under.
+        public bool HasCapsule;
+        public float CapsuleHeight;
+        public Vector3 CapsuleCenter;
+        public float CapsuleRadius;
+        public int CapsuleDirection;
         public BodyState Body;
         public int GunSlot = -1;
         public int GunVariation = -1;
@@ -239,6 +401,14 @@ namespace UltrakillTAS
         public float HardDamage;
         public float Stamina;
         public List<FieldState> Fields;
+        /// <summary>
+        /// The slide/dash internals by name (slideDir, dodgeDir, slideLength, sliding,
+        /// crouching, boost, boostCharge). They are in Fields too; the named copy is applied
+        /// last and logged so a resumed slide is explicit rather than inferred.
+        /// </summary>
+        public List<FieldState> SlideFields;
+        /// <summary>NewMovement.gc: onGround, canJump and the trigger contacts at capture.</summary>
+        public GroundContactState Ground;
         public List<AnimatorState> Animators;
         public List<AgentState> Agents;
     }
@@ -250,6 +420,10 @@ namespace UltrakillTAS
         public string IdentifierType;
         public Vector3 Position;
         public Quaternion Rotation;
+        /// <summary>Local scale of the enemy root. The game changes it (spawn scaling, death squash) and the shared respawn template can carry another instance's scale.</summary>
+        public Vector3 Scale = Vector3.one;
+        /// <summary>Parent of the enemy root at capture (arena containers, scaled holders), used when the root has to be rebuilt.</summary>
+        public Transform Parent;
         public BodyState Body;
         public bool HasHealth;
         public float Health;
@@ -259,6 +433,10 @@ namespace UltrakillTAS
         public List<ObjectFieldState> References;
         public AnimatorState Animator;
         public AgentState Agent;
+        /// <summary>Every NavMeshAgent under the enemy, including dormant child rigs.</summary>
+        public List<AgentState> Agents;
+        /// <summary>NavMeshObstacles under the enemy (shield/body blockers).</summary>
+        public List<NavMeshObstacleState> Obstacles;
         public List<ComponentSnapshot> Behaviours;
         public List<ListRefState> ListRefs;
         /// <summary>Animators beyond the primary one (many enemies animate several rigs).</summary>
@@ -268,8 +446,21 @@ namespace UltrakillTAS
         public bool ActiveSelf = true;
         public bool HasAgentComponent;
         public bool AgentEnabled;
-        /// <summary>Dead or not yet spawned: only identity, pose, active flag and identifier fields are kept.</summary>
+        /// <summary>Legacy: old states kept dead or not-yet-spawned enemies minimal. New captures are complete.</summary>
         public bool Lightweight;
+    }
+
+    public sealed class NavMeshObstacleState
+    {
+        public NavMeshObstacle Obstacle;
+        public bool Enabled;
+        public bool Carving;
+        public bool CarveOnlyStationary;
+        public NavMeshObstacleShape Shape;
+        public Vector3 Center;
+        public Vector3 Size;
+        public float CarvingMoveThreshold;
+        public float CarvingTimeToStationary;
     }
 
     /// <summary>
@@ -529,6 +720,16 @@ namespace UltrakillTAS
         /// <summary>Every enemy root that existed at capture (active or not), for orphan cleanup.</summary>
         public HashSet<GameObject> EnemyRoots = new HashSet<GameObject>();
 
+        /// <summary>Enemy root instance IDs at capture, for the orphan sweep's diagnostics.</summary>
+        public HashSet<int> EnemyIds = new HashSet<int>();
+
+        /// <summary>True when the capture walked the enemy list, even if it found none.</summary>
+        public bool HasEnemySnapshot;
+
+        /// <summary>The script timeline the state belongs to: a load resumes at this tick, not tick 0.</summary>
+        public string ScriptPath;
+        public bool HasTimeline;
+
         /// <summary>
         /// Roots of the tracked transient gameplay objects (shockwaves, beams, landmines, thrown
         /// swords, ...; see SaveStateManager.TransientTypeNames) alive at capture. A load removes
@@ -619,7 +820,10 @@ namespace UltrakillTAS
         static readonly string[] AuxiliaryTypeNames =
         {
             "WeaponCharges", "WeaponHUD", "StatsManager", "StyleHUD", "StyleCalculator", "HookArm",
-            "TimeController", "CheckPointsController", "CrateCounter"
+            "TimeController", "CheckPointsController", "CrateCounter",
+            // Fluid presentation/broad-phase state. Water volumes themselves are captured as
+            // loose scripts; these two own the underwater calls and dry-zone collider counts.
+            "UnderwaterController", "DryZoneController"
         };
 
         static readonly Dictionary<Type, FieldPlan[]> FieldCache = new Dictionary<Type, FieldPlan[]>();
@@ -674,7 +878,8 @@ namespace UltrakillTAS
             Savestate state = GetSlot(slot);
             if (state == null)
                 return "empty";
-            return state.Label + " @ " + state.ScriptTime.ToString("0.00") + "s (" +
+            return state.Label + " @ tick " + state.Tick + ", " +
+                   state.ScriptTime.ToString("0.######") + "s (" +
                    state.ObjectCount + " objects, " + state.Enemies.Count + " enemies, " +
                    state.Doors.Count + " doors, " + state.Projectiles.Count + " projectiles" +
                    (state.StaticFields.Count > 0 ? ", " + state.StaticFields.Count + " statics" : string.Empty) +
@@ -691,6 +896,7 @@ namespace UltrakillTAS
 
         public void ClearAll()
         {
+            ReleasePlayerLoadHold();
             for (int i = 0; i < SlotCount; i++)
                 _slots[i] = null;
             StartState = null;
@@ -702,6 +908,10 @@ namespace UltrakillTAS
         // ------------------------------------------------------------------
 
         public const int DefaultHistoryTicks = 120;
+        /// <summary>Live particle vertices copied per system / per slot save.</summary>
+        const int MaxParticleBufferPerSystem = 8192;
+        const int MaxParticleBufferTotal = 131072;
+        int _particleBufferBudget;
         bool _warnedSlowCapture;
         /// <summary>Set after a slow history snapshot: later ones skip Deep fields (see _lightCapture).</summary>
         bool _historyLight;
@@ -816,12 +1026,18 @@ namespace UltrakillTAS
             return SaveResult.Ok(message, state.ObjectCount, 0);
         }
 
-        public SaveResult Load(int slot)
+        public SaveResult Load(int slot, bool resetToMapCheckpoint = true)
         {
             Savestate state = GetSlot(slot);
             if (state == null)
                 return SaveResult.Fail("Slot " + slot + " is empty.");
-            SaveResult result = Restore(state);
+            // A slot load is a user load: the opt-in map checkpoint reset applies here, unless
+            // the engine already ran the game's checkpoint reload ahead of a settled restore.
+            // The arena re-arm is independent of that option and always runs for a user load.
+            _arenaResetForThisRestore = true;
+            SaveResult result;
+            try { result = Restore(state, resetToMapCheckpoint); }
+            finally { _arenaResetForThisRestore = false; }
             _plugin.Toast(result.Message, !result.Success);
             return result;
         }
@@ -867,10 +1083,45 @@ namespace UltrakillTAS
         /// <summary>Restores the optimizer master. Transient states never touch the user's slots or history.</summary>
         public SaveResult RestoreOptimizerMaster(Savestate master)
         {
-            return RestoreTransient(master);
+            _skipGoreSweep = true;
+            try { return RestoreTransient(master); }
+            finally
+            {
+                _skipGoreSweep = false;
+            }
         }
 
         public Savestate Capture(string label)
+        {
+            // Saving while a loaded state pins V1: release the hold for the capture (no frame
+            // runs, so the body cannot move), save the real dynamic body, then pin the new
+            // state again. Otherwise the slot would record a kinematic, zero-velocity player.
+            bool reholdPlayer = PlayerLoadHeld;
+            Savestate heldPlayerState = _playerLoadState;
+            if (reholdPlayer)
+                ReleasePlayerLoadHold();
+            Savestate state = null;
+            try
+            {
+                state = CaptureCore(label);
+                return state;
+            }
+            finally
+            {
+                if (reholdPlayer)
+                {
+                    // Normally the new state becomes the hold. If the capture failed or has no
+                    // player, keep the old state pinned instead of silently unfreezing V1.
+                    Savestate hold = state != null && state.Player != null && state.Player.HasPlayer
+                        ? state
+                        : heldPlayerState;
+                    if (hold != null && hold.Player != null && hold.Player.HasPlayer)
+                        BeginPlayerLoadFreeze(hold);
+                }
+            }
+        }
+
+        Savestate CaptureCore(string label)
         {
             Stopwatch watch = Stopwatch.StartNew();
             Savestate state = new Savestate
@@ -883,6 +1134,10 @@ namespace UltrakillTAS
             state.GameTime = Time.time;
             state.UnscaledTime = Time.unscaledTime;
             state.InputTime = CurrentInputTime();
+            // One budget for the whole state: the player rig, every enemy and the world
+            // particle pass share it, so a level full of emitters cannot allocate without
+            // bound. Slot saves get this; light history captures do not take buffers.
+            _particleBufferBudget = MaxParticleBufferTotal;
 
             // Each category is isolated so one unusual object cannot lose the rest.
             try { CapturePlayer(state); }
@@ -927,6 +1182,15 @@ namespace UltrakillTAS
                 AddWarning(state, "RNG", ex);
             }
 
+            if (TickProvider != null)
+            {
+                state.Tick = TickProvider();
+                state.HasTimeline = state.Tick > 0;
+            }
+            if (TimeProvider != null)
+                state.ScriptTime = TimeProvider();
+            if (ScriptProvider != null)
+                state.ScriptPath = ScriptProvider();
             state.CaptureMilliseconds = watch.Elapsed.TotalMilliseconds;
             // Nothing is truncated to keep a save fast any more; a slow level is reported once.
             if (!_warnedSlowFullCapture && !_lightCapture && state.CaptureMilliseconds > SlowCaptureMilliseconds)
@@ -1011,14 +1275,41 @@ namespace UltrakillTAS
                 GunVariation = _bridge.GunVariation
             };
 
+            Transform playerTransform = component.transform;
+            snapshot.HasLocalPose = true;
+            snapshot.LocalPosition = playerTransform.localPosition;
+            snapshot.LocalRotation = playerTransform.localRotation;
+            snapshot.LocalScale = playerTransform.localScale;
+
             Rigidbody body = _bridge.PlayerRigidbody;
             if (body != null)
+            {
                 snapshot.Body = CaptureBody(body);
+                snapshot.HasBodyPose = true;
+                snapshot.BodyPosition = body.position;
+                snapshot.BodyRotation = body.rotation;
+            }
+
+            // NewMovement.playerCollider is the capsule that collides with walls; a slide
+            // shrinks it to crouch height, so its exact shape belongs to the state.
+            CapsuleCollider capsule = ReadMember(player, new[] { "playerCollider", "capsule" }) as CapsuleCollider;
+            if (capsule != null)
+            {
+                snapshot.HasCapsule = true;
+                snapshot.CapsuleHeight = capsule.height;
+                snapshot.CapsuleCenter = capsule.center;
+                snapshot.CapsuleRadius = capsule.radius;
+                snapshot.CapsuleDirection = capsule.direction;
+            }
 
             snapshot.Health = ReadFloat(player, HealthNames, 0f);
             snapshot.HardDamage = ReadFloat(player, BleedNames, 0f);
             snapshot.Stamina = ReadFloat(player, new[] { "stamina", "staminaMeter", "staminaPoints", "stam" }, 0f);
-            snapshot.Fields = CaptureFields(player, 64);
+            // FieldCap, not 64: NewMovement has roughly 150 fields and the movement state
+            // (sliding, boost, boostCharge, falling, fallTime) sits past the old limit.
+            snapshot.Fields = CaptureFields(player, FieldCap);
+            snapshot.SlideFields = CaptureNamedFields(player, SlideFieldNames);
+            snapshot.Ground = CaptureGround(player);
             snapshot.Dead = ReadBool(player, DeadNames, false);
             // NewMovement's own enabled flag, references, pending Jump/Dodge Invokes and
             // slide/fall effect clones (its fields are in Fields above).
@@ -1033,9 +1324,11 @@ namespace UltrakillTAS
             float yaw;
             if (_bridge.TryGetCameraAngles(out pitch, out yaw))
             {
+                snapshot.HasCameraAngles = true;
                 snapshot.CameraPitch = pitch;
                 snapshot.CameraYaw = yaw;
             }
+            snapshot.Exact = CapturePlayerExact(snapshot, body, playerTransform);
 
             state.Player = snapshot;
         }
@@ -1053,14 +1346,268 @@ namespace UltrakillTAS
                 return;
             }
 
-            component.transform.position = snapshot.Position;
-            component.transform.rotation = snapshot.Rotation;
+            Transform playerTransform = component.transform;
+            if (snapshot.HasLocalPose)
+            {
+                playerTransform.localPosition = snapshot.LocalPosition;
+                playerTransform.localRotation = snapshot.LocalRotation;
+                playerTransform.localScale = snapshot.LocalScale;
+            }
+            playerTransform.position = ExactPosition(snapshot);
+            playerTransform.rotation = ExactRotation(snapshot);
             RestoreBody(snapshot.Body);
+            Rigidbody playerBody = _bridge.PlayerRigidbody;
+            if (playerBody != null && snapshot.HasBodyPose)
+            {
+                // Rigidbody.position is the PhysX pose; the transform can lag it by interpolation.
+                try
+                {
+                    playerBody.position = ExactBodyPosition(snapshot);
+                    playerBody.rotation = ExactBodyRotation(snapshot);
+                }
+                catch
+                {
+                }
+            }
+            if (_playerLoadHeld && playerBody != null && !playerBody.isKinematic)
+            {
+                // RestoreBody put the saved dynamic flag back. During a load hold the body
+                // must stay kinematic until the first resumed tick.
+                try
+                {
+                    playerBody.velocity = Vector3.zero;
+                    playerBody.angularVelocity = Vector3.zero;
+                    playerBody.isKinematic = true;
+                }
+                catch
+                {
+                }
+            }
             ApplyFields(component, snapshot.Fields);
+            // The slide state is written by ApplyFields; the capsule has to follow it before the
+            // broadphase sees the pose, or the first step clips what the run slid under.
+            ApplyNamedFields(component, snapshot.SlideFields);
+            RestoreGroundContact(component, snapshot.Ground);
+            RestorePlayerCapsule(component, snapshot);
+            // Pose, velocity and capsule are final now: push them into PhysX before anything can
+            // run a ground check or a physics step. Without this, NewMovement's first Update after
+            // the load still sees the pre-load collider pose, reports AIR and cancels a slide,
+            // which also zeroes its lateral velocity.
+            Physics.SyncTransforms();
+            // The trigger callbacks that normally keep onGround current have not run for the
+            // restored pose yet, so ask the game for a ground check now and then put the saved
+            // flags back: the autoslide on the first resumed tick reads this, not the latched
+            // trigger contacts.
+            bool groundChecked = ForceGroundCheck(component);
+            ApplyGroundFlags(component, snapshot.Ground);
+            _plugin.LogInfo("Ground contact restored: onGround=" +
+                            (snapshot.Ground != null && snapshot.Ground.HasOnGround ? snapshot.Ground.OnGround.ToString() : "?") +
+                            " canJump=" +
+                            (snapshot.Ground != null && snapshot.Ground.HasCanJump ? snapshot.Ground.CanJump.ToString() : "?") +
+                            " checkInvoked=" + groundChecked);
+            CapsuleCollider restoredCapsule = ReadMember(component, new[] { "playerCollider", "capsule" }) as CapsuleCollider;
+            // The movement flags live in NewMovement's captured fields (sliding, crouching, boost,
+            // jumping, falling, fallTime, boostCharge); log them so a restore that drops them is
+            // visible instead of showing up as a cancelled slide further down the run.
+            _plugin.LogInfo("Player state restored: sliding=" + ReadBool(component, new[] { "sliding" }, false) +
+                            " crouching=" + ReadBool(component, new[] { "crouching" }, false) +
+                            " boost=" + ReadBool(component, new[] { "boost" }, false) +
+                            " falling=" + ReadBool(component, new[] { "falling" }, false) +
+                            " fallTime=" + ReadFloat(component, new[] { "fallTime" }, 0f).ToString("0.000") +
+                            " boostCharge=" + ReadFloat(component, new[] { "boostCharge" }, 0f).ToString("0.000") +
+                            " slideDir=" + GetVector3(component, "slideDir").ToString("0.00") +
+                            " slideLength=" + ReadFloat(component, new[] { "slideLength" }, 0f).ToString("0.000") +
+                            " capsuleHeight=" + (restoredCapsule != null ? restoredCapsule.height.ToString("0.000") : "n/a"));
             RestoreComponent(snapshot.Extra);
             RestoreAnimators(snapshot.Animators);
             RestoreAgents(snapshot.Agents);
             restored++;
+        }
+
+        /// <summary>
+        /// Put the player capsule back to the shape it had on the captured frame. A slide crouches
+        /// it; if a load leaves the standing capsule, the first physics step clips the doorframe
+        /// the continuous run slid under and PhysX reflects the velocity back out.
+        /// </summary>
+        void RestorePlayerCapsule(Component player, PlayerState snapshot)
+        {
+            if (player == null || snapshot == null || !snapshot.HasCapsule)
+                return;
+            CapsuleCollider capsule = ReadMember(player, new[] { "playerCollider", "capsule" }) as CapsuleCollider;
+            if (capsule == null)
+                return;
+            capsule.height = snapshot.CapsuleHeight;
+            capsule.center = snapshot.CapsuleCenter;
+            capsule.radius = snapshot.CapsuleRadius;
+            capsule.direction = snapshot.CapsuleDirection;
+        }
+
+        /// <summary>
+        /// NewMovement's slide/dash members by name. The generic field pass captures them too,
+        /// but naming them keeps the restore ordered and auditable: a missing slideDir is the
+        /// difference between a resumed slide and an instant stand-up.
+        /// </summary>
+        static readonly string[] SlideFieldNames =
+        {
+            "slideDir",
+            "dodgeDir",
+            "slideLength",
+            "sliding",
+            "crouching",
+            "boost",
+            "boostCharge"
+        };
+
+        /// <summary>Capture the named fields that exist on this build; unknown names are skipped.</summary>
+        static List<FieldState> CaptureNamedFields(object target, string[] names)
+        {
+            List<FieldState> fields = new List<FieldState>(names != null ? names.Length : 0);
+            if (target == null || names == null)
+                return fields;
+            DeepContext context = null;
+            for (int i = 0; i < names.Length; i++)
+            {
+                FieldInfo field = NamedField(target.GetType(), names[i]);
+                if (field == null || field.IsLiteral)
+                    continue;
+                try
+                {
+                    FieldPlan plan = ClassifyField(field, true);
+                    if (plan == null)
+                        continue;
+                    FieldState value = CaptureField(plan, target, field.GetValue(target), ref context);
+                    if (value != null)
+                        fields.Add(value);
+                }
+                catch
+                {
+                }
+            }
+            return fields;
+        }
+
+        static void ApplyNamedFields(object target, List<FieldState> fields)
+        {
+            if (target == null || fields == null)
+                return;
+            for (int i = 0; i < fields.Count; i++)
+            {
+                FieldState field = fields[i];
+                if (field == null)
+                    continue;
+                try { ApplyField(target, field); }
+                catch { }
+            }
+        }
+
+        /// <summary>NewMovement.gc's serialized state, including its latched trigger contacts.</summary>
+        GroundContactState CaptureGround(object player)
+        {
+            if (player == null)
+                return null;
+            Component check = ReadMember(player, new[] { "gc", "groundCheck", "ground" }) as Component;
+            if (check == null)
+                return null;
+            GroundContactState ground = new GroundContactState { Check = check };
+            ComponentSnapshot snapshot = CaptureComponent(check, RefCap);
+            if (snapshot != null)
+            {
+                ground.Fields = snapshot.Fields;
+                ground.References = snapshot.References;
+                ground.ListRefs = snapshot.ListRefs;
+            }
+            object onGround = ReadMember(check, new[] { "onGround" });
+            if (onGround != null)
+            {
+                ground.HasOnGround = true;
+                ground.OnGround = GameBridge.ToBool(onGround, false);
+            }
+            object canJump = ReadMember(check, new[] { "canJump" });
+            if (canJump != null)
+            {
+                ground.HasCanJump = true;
+                ground.CanJump = GameBridge.ToBool(canJump, true);
+            }
+            return ground;
+        }
+
+        /// <summary>Write the GroundCheck snapshot back onto the live component.</summary>
+        void RestoreGroundContact(Component player, GroundContactState ground)
+        {
+            if (player == null || ground == null)
+                return;
+            Component check = Resolve(ground.Check) ??
+                              ReadMember(player, new[] { "gc", "groundCheck", "ground" }) as Component;
+            if (check == null)
+            {
+                _plugin.LogWarning("Ground check missing on the restored player; its flags could not be restored.");
+                return;
+            }
+            try
+            {
+                ApplyFields(check, ground.Fields);
+                ApplyReferences(check, ground.References);
+                RestoreListRefs(check, ground.ListRefs);
+            }
+            catch (Exception ex)
+            {
+                _plugin.LogWarning("Ground check restore skipped: " + ex.Message);
+            }
+        }
+
+        /// <summary>
+        /// Run the game's own ground check after the pose is in PhysX, so onGround reflects the
+        /// restored position instead of the contacts from the discarded timeline. Candidate
+        /// names are tried because the method is renamed between ULTRAKILL patches.
+        /// </summary>
+        bool ForceGroundCheck(Component player)
+        {
+            Component check = ReadMember(player, new[] { "gc", "groundCheck", "ground" }) as Component;
+            if (check == null)
+                return false;
+            MethodInfo[] methods;
+            try { methods = check.GetType().GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic); }
+            catch { return false; }
+            for (int i = 0; i < methods.Length; i++)
+            {
+                MethodInfo method = methods[i];
+                if (method.GetParameters().Length != 0)
+                    continue;
+                string name = method.Name;
+                if (name != "CheckGround" && name != "GroundCheck" &&
+                    name != "CheckGroundState" && name != "UpdateGround")
+                    continue;
+                try
+                {
+                    method.Invoke(check, null);
+                    return true;
+                }
+                catch
+                {
+                }
+            }
+            return false;
+        }
+
+        /// <summary>The saved flags are authoritative: trigger contacts have not fired yet.</summary>
+        void ApplyGroundFlags(Component player, GroundContactState ground)
+        {
+            if (player == null || ground == null)
+                return;
+            Component check = ReadMember(player, new[] { "gc", "groundCheck", "ground" }) as Component;
+            if (check == null)
+                return;
+            try
+            {
+                if (ground.HasOnGround)
+                    SetMember(check, new[] { "onGround" }, ground.OnGround);
+                if (ground.HasCanJump)
+                    SetMember(check, new[] { "canJump" }, ground.CanJump);
+            }
+            catch (Exception ex)
+            {
+                _plugin.LogWarning("Ground flags restore skipped: " + ex.Message);
+            }
         }
 
         // ------------------------------------------------------------------
@@ -1073,6 +1620,8 @@ namespace UltrakillTAS
         const int MaxAnimatorsPerEnemy = 1024;
         const int MaxCollidersPerEnemy = 4096;
         const int MaxParticlesPerEnemy = 2048;
+        const int MaxAgentsPerEnemy = 256;
+        const int MaxObstaclesPerEnemy = 256;
         /// <summary>Animators on the player hierarchy (arms, weapons, camera rig).</summary>
         const int MaxPlayerAnimators = 1024;
 
@@ -1080,6 +1629,8 @@ namespace UltrakillTAS
         {
             if (_identifierType == null)
                 return;
+            // Distinguishes "no enemies existed" from "the enemy pass did not run".
+            state.HasEnemySnapshot = true;
 
             // includeInactive: arena enemies waiting to spawn are recorded too, so a
             // load puts them back to sleep and they are not mistaken for orphans.
@@ -1094,6 +1645,7 @@ namespace UltrakillTAS
                 if (IsTemplateClone(root))
                     continue;
                 state.EnemyRoots.Add(root);
+                state.EnemyIds.Add(root.GetInstanceID());
                 try
                 {
                     bool dead = ReadBool(identifier, DeadNames, false);
@@ -1104,9 +1656,14 @@ namespace UltrakillTAS
                         IdentifierType = identifier.GetType().Name,
                         Position = root.transform.position,
                         Rotation = root.transform.rotation,
+                        Scale = root.transform.localScale,
+                        Parent = root.transform.parent,
                         ActiveSelf = root.activeSelf,
                         Dead = dead,
-                        Lightweight = !root.activeInHierarchy || dead,
+                        // Dormant and dead enemies are complete states too. A dormant arena
+                        // actor can wake after a load, and a dead ragdoll can be revived or
+                        // gibbed: both need their AI, animators, colliders and child rigs.
+                        Lightweight = false,
                         Fields = CaptureFields(identifier, FieldCap)
                     };
 
@@ -1118,28 +1675,27 @@ namespace UltrakillTAS
                     }
                     enemy.Bleed = ReadFloat(identifier, BleedNames, 0f);
 
-                    if (!enemy.Lightweight)
-                    {
-                        enemy.References = CaptureReferences(identifier, RefCap);
-                        enemy.ListRefs = CaptureListRefs(identifier);
-                        enemy.Behaviours = CaptureBehaviours(root, identifier);
+                    enemy.References = CaptureReferences(identifier, RefCap);
+                    enemy.ListRefs = CaptureListRefs(identifier);
+                    enemy.Behaviours = CaptureBehaviours(root, identifier);
 
-                        Animator primary = FindAnimator(root);
-                        enemy.Animator = CaptureAnimator(primary, true);
-                        enemy.ExtraAnimators = CaptureAnimatorsExcept(root, MaxAnimatorsPerEnemy, primary);
-                        enemy.Colliders = CaptureColliders(root, MaxCollidersPerEnemy);
-                        enemy.Particles = new List<ParticleSnapshot>();
-                        CaptureParticles(root, MaxParticlesPerEnemy, enemy.Particles);
+                    Animator primary = FindAnimator(root);
+                    enemy.Animator = CaptureAnimator(primary, true);
+                    enemy.ExtraAnimators = CaptureAnimatorsExcept(root, MaxAnimatorsPerEnemy, primary);
+                    enemy.Colliders = CaptureColliders(root, MaxCollidersPerEnemy);
+                    enemy.Particles = new List<ParticleSnapshot>();
+                    CaptureParticles(root, MaxParticlesPerEnemy, enemy.Particles, !_lightCapture);
 
-                        NavMeshAgent agent = root.GetComponent<NavMeshAgent>();
-                        enemy.HasAgentComponent = agent != null;
-                        enemy.AgentEnabled = agent != null && agent.enabled;
-                        enemy.Agent = CaptureAgent(agent);
+                    NavMeshAgent agent = root.GetComponent<NavMeshAgent>();
+                    enemy.HasAgentComponent = agent != null;
+                    enemy.AgentEnabled = agent != null && agent.enabled;
+                    enemy.Agent = CaptureAgent(agent);
+                    enemy.Agents = CaptureAgents(root, MaxAgentsPerEnemy);
+                    enemy.Obstacles = CaptureObstacles(root, MaxObstaclesPerEnemy);
 
-                        Rigidbody body = root.GetComponent<Rigidbody>();
-                        if (body != null)
-                            enemy.Body = CaptureBody(body);
-                    }
+                    Rigidbody body = root.GetComponent<Rigidbody>();
+                    if (body != null)
+                        enemy.Body = CaptureBody(body);
                     state.Enemies.Add(enemy);
                 }
                 catch (Exception ex)
@@ -1171,6 +1727,9 @@ namespace UltrakillTAS
 
                     root.transform.position = enemy.Position;
                     root.transform.rotation = enemy.Rotation;
+                    Vector3 rootScale = enemy.Scale;
+                    if (rootScale.x != 0f && rootScale.y != 0f && rootScale.z != 0f)
+                        root.transform.localScale = rootScale;
                     ApplyFields(identifier, enemy.Fields);
                     if (enemy.HasHealth)
                         SetMember(identifier, HealthNames, enemy.Health);
@@ -1202,6 +1761,8 @@ namespace UltrakillTAS
                         }
                     }
                     RestoreAgent(enemy.Agent);
+                    RestoreAgents(enemy.Agents);
+                    RestoreObstacles(enemy.Obstacles);
                     restored++;
                 }
                 catch (Exception ex)
@@ -1444,21 +2005,32 @@ namespace UltrakillTAS
                             Fields = CaptureFields(component, 48)
                         };
 
-                        Rigidbody body = root.GetComponent<Rigidbody>();
-                        if (body != null)
-                            projectile.Body = CaptureBody(body);
-
-                        projectile.ComponentType = component.GetType();
-                        projectile.PrefabName = CleanObjectName(root.name);
-                        projectile.References = CaptureReferences(component, RefCap);
-                        projectile.Template = GetOrCreateTemplate(component, root);
-                        projectile.ListRefs = CaptureListRefs(component);
-                        if (projectile.TypeName == "Coin")
-                            projectile.Coin = CaptureCoin(component, root);
-
+                        // The projectile is recorded before its optional metadata: if template
+                        // creation or reference capture throws, a live airborne coin (or any
+                        // projectile) must still be in the savestate, otherwise the load's
+                        // orphan sweep destroys it and the coin vanishes on reload.
                         state.Projectiles.Add(projectile);
                         state.ProjectileIds.Add(root.GetInstanceID());
                         state.ProjectileRoots.Add(root);
+
+                        try
+                        {
+                            Rigidbody body = root.GetComponent<Rigidbody>();
+                            if (body != null)
+                                projectile.Body = CaptureBody(body);
+
+                            projectile.ComponentType = component.GetType();
+                            projectile.PrefabName = CleanObjectName(root.name);
+                            projectile.References = CaptureReferences(component, RefCap);
+                            projectile.Template = GetOrCreateTemplate(component, root);
+                            projectile.ListRefs = CaptureListRefs(component);
+                            if (projectile.TypeName == "Coin")
+                                projectile.Coin = CaptureCoin(component, root);
+                        }
+                        catch (Exception ex)
+                        {
+                            state.Warnings.Add("projectile metadata " + component.GetType().Name + ": " + ex.Message);
+                        }
                     }
                     catch (Exception ex)
                     {
@@ -1553,7 +2125,8 @@ namespace UltrakillTAS
                         continue;
                     GameObject root = component.gameObject;
                     int id = root.GetInstanceID();
-                    if (savedRoots.Contains(root) || state.ProjectileIds.Contains(id) || !destroyed.Add(id))
+                    if (savedRoots.Contains(root) || state.ProjectileIds.Contains(id) ||
+                        _checkpointFresh.Contains(root) || !destroyed.Add(id))
                         continue;
                     if (playerTransform != null && root.transform.IsChildOf(playerTransform))
                         continue;
@@ -1569,9 +2142,16 @@ namespace UltrakillTAS
             // Second pass: list membership (a Magnet's sawblades, connected magnets) can point at
             // other projectiles, including respawned ones, so it is applied once all exist.
             Component[] resolved = new Component[state.Projectiles.Count];
+            int coinSaved = 0;
+            int coinLive = 0;
+            int coinRespawned = 0;
+            int coinMissing = 0;
             for (int i = 0; i < state.Projectiles.Count; i++)
             {
                 ProjectileState projectile = state.Projectiles[i];
+                bool isCoin = projectile.TypeName == "Coin";
+                if (isCoin)
+                    coinSaved++;
                 Component component = Resolve(projectile.Component);
                 if (component == null)
                 {
@@ -1580,14 +2160,24 @@ namespace UltrakillTAS
                     component = RespawnProjectile(state, projectile);
                     if (component == null)
                     {
+                        if (isCoin)
+                        {
+                            coinMissing++;
+                            _plugin.LogWarning("Coin from the savestate is missing and could not be respawned (pos " +
+                                               projectile.Position.ToString("0.##") + ").");
+                        }
                         missing++;
                         continue;
                     }
+                    if (isCoin)
+                        coinRespawned++;
                     resolved[i] = component;
                     respawned++;
                     restored++;
                     continue;
                 }
+                if (isCoin)
+                    coinLive++;
 
                 resolved[i] = component;
                 try
@@ -1607,6 +2197,9 @@ namespace UltrakillTAS
                 }
             }
 
+            if (coinSaved > 0)
+                _plugin.LogInfo("Savestate coins: " + coinSaved + " saved, " + coinLive + " live, " +
+                                coinRespawned + " respawned, " + coinMissing + " missing.");
             for (int i = 0; i < state.Projectiles.Count; i++)
             {
                 if (resolved[i] != null)
@@ -1828,13 +2421,58 @@ namespace UltrakillTAS
         // Restore
         // ------------------------------------------------------------------
 
-        public SaveResult Restore(Savestate state)
+        /// <summary>True while a savestate restore is being applied.</summary>
+        public bool IsRestoring { get { return _restoreInProgress; } }
+        bool _restoreInProgress;
+        /// <summary>Set around a user load (slot load or norefresh resume); rewinds and optimizer restores never set it.</summary>
+        bool _arenaResetForThisRestore;
+
+        /// <param name="resetToMapCheckpoint">
+        /// True for a load the user asked for (a slot load or a norefresh resume), which is when
+        /// the opt-in map checkpoint reset in front of the restore applies. Rewinds and optimizer
+        /// candidates pass false: they restore many times per second and must not rebuild rooms.
+        /// </param>
+        public SaveResult Restore(Savestate state, bool resetToMapCheckpoint = false)
         {
             if (state == null)
                 return SaveResult.Fail("Savestate is null.");
+            _restoreInProgress = true;
+            try
+            {
+                return RestoreCore(state, resetToMapCheckpoint);
+            }
+            finally
+            {
+                _restoreInProgress = false;
+            }
+        }
+
+        SaveResult RestoreCore(Savestate state, bool resetToMapCheckpoint)
+        {
+            // Arena triggers are re-armed only for a user load. The flag is consumed here so a
+            // nested/internal restore can never inherit it.
+            bool resetArenas = _arenaResetForThisRestore;
+            _arenaResetForThisRestore = false;
+
             if (!string.IsNullOrEmpty(state.SceneName) && state.SceneName != _bridge.SceneName)
                 return SaveResult.Fail("Savestate was made in scene '" + state.SceneName +
                                        "' but the current scene is '" + _bridge.SceneName + "'. Load it in the same scene.");
+
+            // Opt-in, and before the freeze and before any saved value is written: respawn at the
+            // last map checkpoint so arenas, rooms, doors and checkpoint-scoped objects start
+            // from the checkpoint instead of from whatever the player did after it.
+            if (resetToMapCheckpoint && _plugin.ResetToMapCheckpointOnLoad != null &&
+                _plugin.ResetToMapCheckpointOnLoad.Value)
+            {
+                try { ResetToMapCheckpoint(); }
+                catch (Exception ex) { _plugin.LogWarning("Map checkpoint reset skipped: " + ex.Message); }
+            }
+
+            // Freeze V1 before a single value is written and keep him pinned until the first
+            // resumed tick. Restoring enables objects, runs OnEnable, restarts coroutines and
+            // calls Animator.Update; any of those can move or re-velocity the player, and the
+            // hold keeps every intermediate step from touching the stored pose.
+            BeginPlayerLoadFreeze(state);
 
             Stopwatch watch = Stopwatch.StartNew();
             int restored = 0;
@@ -1856,7 +2494,9 @@ namespace UltrakillTAS
             // Order matters: things that wake or sleep objects come first (their OnEnable
             // then runs before any saved value is written), values next, effects last,
             // and the RNG streams after everything that might have drawn from them.
-            try { RestoreLevelElements(state, ref restored, ref missing); }
+            // resetArenas is true only for a load the user asked for (slot load or norefresh
+            // resume): the same load re-arms the arena triggers the game destroyed.
+            try { RestoreLevelElements(state, ref restored, ref missing, resetArenas); }
             catch (Exception ex) { _plugin.LogWarning("Savestate level restore skipped: " + ex.Message); }
             // Undo a death first: it re-enables the camera, weapons and fists that the
             // rig and player restores below then put back to their saved values.
@@ -1897,7 +2537,8 @@ namespace UltrakillTAS
             try { RestoreLoadedParts(state, ref missing); }
             catch (Exception ex) { _plugin.LogWarning("Savestate loaded-parts check skipped: " + ex.Message); }
 
-            _bridge.SetCameraAngles(state.Player.CameraPitch, state.Player.CameraYaw);
+            if (state.Player != null)
+                _bridge.SetCameraAngles(state.Player.CameraPitch, state.Player.CameraYaw);
 
             // Animators and particles are re-posed after the physics sync so a pose that
             // depends on world position sees the restored transforms.
@@ -1909,8 +2550,8 @@ namespace UltrakillTAS
             RestoreModules(state, ref restored, ref missing);
 
             // A state taken inside a game hitstop gets that hitstop back exactly (currentStop,
-            // its tick timers) and resumes it; see SaveStateManager.Timing.cs. Time.timeScale
-            // is never written by a load.
+            // its tick timers) and resumes it; see SaveStateManager.Timing.cs. Outside a stop,
+            // the saved game Time.timeScale is put back by that same step.
             bool midHitstop = RestoreHitstop(state);
 
             // The clock's physics carry belongs to the timeline that was just discarded;
@@ -1918,15 +2559,40 @@ namespace UltrakillTAS
             if (!midHitstop && ResetHitstop != null)
                 ResetHitstop();
 
+            // Last fix-ups (animator Update, re-armed coroutines) that need everything above.
+            RunPostRestore(state);
+
+            // The gore the death spawned after the save is swept before the world is pushed
+            // into PhysX. Enemies are restored in place; one that no longer exists is simply
+            // counted as missing and is never re-instantiated.
+            if (cleanup && !_skipGoreSweep)
+            {
+                try { CleanupGoreAfterRestore(state); }
+                catch (Exception ex) { _plugin.LogWarning("Savestate gore cleanup skipped: " + ex.Message); }
+            }
+
+            // They write transforms (animator poses, rebuilt children, colliders), so push the
+            // restored world into PhysX before anything can run a ground check or a physics
+            // step. Without this last sync the first tick after a load can still see the
+            // pre-load collider positions and register a ground contact that never happened.
+            Physics.SyncTransforms();
+
+            // The load is fully applied: every object, module and coroutine is back. Re-apply
+            // V1 one last time (PostRestore ran game code after the player restore) and keep him
+            // pinned for the first resumed tick. This runs before the RNG restore because
+            // RestoreAnimators calls Animator.Update(0), which may run animation events.
+            FinishPlayerLoad(state);
+
+            // RNG dead last, after every step that can run game code: RunPostRestore restarts
+            // coroutines, and StartCoroutine runs a coroutine's first segment synchronously, so a
+            // roll taken there would otherwise be drawn from the restored stream and shift every
+            // later roll of the run (AI, spreads, coin bounces).
             if (state.HasUnityRandomState)
             {
                 _rng.RestoreUnityState(state.UnityRandomState);
                 _rng.SystemSeedStream = state.SystemSeedStream;
             }
             int restoredRandoms = _rng.RestoreSystemRandoms(state.SystemRandoms);
-
-            // Last fix-ups (animator Update, re-armed coroutines) that need everything above.
-            RunPostRestore(state);
 
             double milliseconds = watch.Elapsed.TotalMilliseconds;
             string message = "Loaded " + state.Label + " from " + state.ScriptTime.ToString("0.00") +
@@ -1954,7 +2620,18 @@ namespace UltrakillTAS
                 DetectCollisions = body.detectCollisions,
                 Constraints = body.constraints,
                 Drag = body.drag,
-                AngularDrag = body.angularDrag
+                AngularDrag = body.angularDrag,
+                Mass = body.mass,
+                CenterOfMass = body.centerOfMass,
+                InertiaTensor = body.inertiaTensor,
+                InertiaTensorRotation = body.inertiaTensorRotation,
+                Interpolation = body.interpolation,
+                CollisionDetectionMode = body.collisionDetectionMode,
+                MaxAngularVelocity = body.maxAngularVelocity,
+                MaxDepenetrationVelocity = body.maxDepenetrationVelocity,
+                SleepThreshold = body.sleepThreshold,
+                SolverIterations = body.solverIterations,
+                SolverVelocityIterations = body.solverVelocityIterations
             };
             // Kinematic bodies reject velocity writes, so only read them when the
             // body is dynamic; this is the source of the old warning flood.
@@ -1979,6 +2656,20 @@ namespace UltrakillTAS
                 body.detectCollisions = snapshot.DetectCollisions;
                 body.drag = snapshot.Drag;
                 body.angularDrag = snapshot.AngularDrag;
+                body.mass = snapshot.Mass;
+                if (snapshot.Mass > 0f)
+                {
+                    body.centerOfMass = snapshot.CenterOfMass;
+                    body.inertiaTensor = snapshot.InertiaTensor;
+                    body.inertiaTensorRotation = snapshot.InertiaTensorRotation;
+                }
+                body.interpolation = snapshot.Interpolation;
+                body.collisionDetectionMode = snapshot.CollisionDetectionMode;
+                body.maxAngularVelocity = snapshot.MaxAngularVelocity;
+                body.maxDepenetrationVelocity = snapshot.MaxDepenetrationVelocity;
+                body.sleepThreshold = snapshot.SleepThreshold;
+                body.solverIterations = snapshot.SolverIterations;
+                body.solverVelocityIterations = snapshot.SolverVelocityIterations;
                 body.isKinematic = snapshot.IsKinematic;
                 if (!body.isKinematic)
                 {
@@ -1997,24 +2688,42 @@ namespace UltrakillTAS
 
         static AgentState CaptureAgent(NavMeshAgent agent)
         {
-            if (agent == null || !agent.isActiveAndEnabled || !agent.isOnNavMesh)
+            if (agent == null)
                 return null;
-            return new AgentState
+            AgentState snapshot = new AgentState
             {
                 Agent = agent,
-                Position = agent.transform.position,
-                Destination = agent.destination,
-                Velocity = agent.velocity,
-                IsStopped = agent.isStopped,
-                HasPath = agent.hasPath,
+                Enabled = agent.enabled,
+                OnNavMesh = agent.isOnNavMesh,
+                AutoTraverseOffMeshLink = agent.autoTraverseOffMeshLink,
+                AutoRepath = agent.autoRepath,
+                AreaMask = agent.areaMask,
                 Speed = agent.speed,
                 Acceleration = agent.acceleration,
                 AngularSpeed = agent.angularSpeed,
                 StoppingDistance = agent.stoppingDistance,
                 AutoBraking = agent.autoBraking,
                 UpdatePosition = agent.updatePosition,
-                UpdateRotation = agent.updateRotation
+                UpdateRotation = agent.updateRotation,
+                Radius = agent.radius,
+                Height = agent.height,
+                BaseOffset = agent.baseOffset,
+                AvoidancePriority = agent.avoidancePriority,
+                ObstacleAvoidanceType = agent.obstacleAvoidanceType,
+                UpdateUpAxis = agent.updateUpAxis
             };
+            if (!agent.isActiveAndEnabled || !agent.isOnNavMesh)
+                return snapshot;
+            snapshot.Position = agent.transform.position;
+            snapshot.Destination = agent.destination;
+            snapshot.Velocity = agent.velocity;
+            snapshot.IsStopped = agent.isStopped;
+            snapshot.HasPath = agent.hasPath;
+            snapshot.PathPending = agent.pathPending;
+            snapshot.PathStatus = agent.pathStatus;
+            snapshot.RemainingDistance = agent.remainingDistance;
+            snapshot.Path = agent.path;
+            return snapshot;
         }
 
         static void RestoreAgent(AgentState snapshot)
@@ -2022,7 +2731,7 @@ namespace UltrakillTAS
             if (snapshot == null || snapshot.Agent == null)
                 return;
             NavMeshAgent agent = snapshot.Agent;
-            if (!agent.isActiveAndEnabled)
+            if (!agent)
                 return;
             try
             {
@@ -2035,6 +2744,26 @@ namespace UltrakillTAS
                 agent.autoBraking = snapshot.AutoBraking;
                 agent.updatePosition = snapshot.UpdatePosition;
                 agent.updateRotation = snapshot.UpdateRotation;
+                agent.radius = snapshot.Radius;
+                agent.height = snapshot.Height;
+                agent.baseOffset = snapshot.BaseOffset;
+                agent.avoidancePriority = snapshot.AvoidancePriority;
+                agent.obstacleAvoidanceType = snapshot.ObstacleAvoidanceType;
+                agent.updateUpAxis = snapshot.UpdateUpAxis;
+                agent.autoTraverseOffMeshLink = snapshot.AutoTraverseOffMeshLink;
+                agent.autoRepath = snapshot.AutoRepath;
+                agent.areaMask = snapshot.AreaMask;
+
+                if (!snapshot.Enabled)
+                {
+                    if (agent.enabled)
+                        agent.enabled = false;
+                    return;
+                }
+                if (!agent.enabled)
+                    agent.enabled = true;
+                if (!agent.isActiveAndEnabled)
+                    return;
 
                 // An agent knocked off the mesh since the save is put back on it before
                 // any NavMesh call, otherwise Warp/SetPath throw.
@@ -2056,6 +2785,14 @@ namespace UltrakillTAS
 
                 if (snapshot.HasPath)
                 {
+                    if (snapshot.Path != null && snapshot.Path.corners != null &&
+                        snapshot.Path.corners.Length > 0)
+                    {
+                        agent.SetPath(snapshot.Path);
+                        agent.velocity = snapshot.Velocity;
+                        agent.isStopped = snapshot.IsStopped;
+                        return;
+                    }
                     // CalculatePath + SetPath is synchronous. SetDestination only queues a
                     // path request, so the agent would walk a frame with no path and the
                     // replay could diverge from the original.
@@ -2075,6 +2812,66 @@ namespace UltrakillTAS
             }
             catch
             {
+            }
+        }
+
+        static List<NavMeshObstacleState> CaptureObstacles(GameObject root, int max)
+        {
+            List<NavMeshObstacleState> result = new List<NavMeshObstacleState>(4);
+            if (root == null || max <= 0)
+                return result;
+            NavMeshObstacle[] obstacles = root.GetComponentsInChildren<NavMeshObstacle>(true);
+            for (int i = 0; i < obstacles.Length && result.Count < max; i++)
+            {
+                NavMeshObstacle obstacle = obstacles[i];
+                if (obstacle == null)
+                    continue;
+                try
+                {
+                    result.Add(new NavMeshObstacleState
+                    {
+                        Obstacle = obstacle,
+                        Enabled = obstacle.enabled,
+                        Carving = obstacle.carving,
+                        CarveOnlyStationary = obstacle.carveOnlyStationary,
+                        Shape = obstacle.shape,
+                        Center = obstacle.center,
+                        Size = obstacle.size,
+                        CarvingMoveThreshold = obstacle.carvingMoveThreshold,
+                        CarvingTimeToStationary = obstacle.carvingTimeToStationary
+                    });
+                }
+                catch
+                {
+                }
+            }
+            return result;
+        }
+
+        static void RestoreObstacles(List<NavMeshObstacleState> snapshots)
+        {
+            if (snapshots == null)
+                return;
+            for (int i = 0; i < snapshots.Count; i++)
+            {
+                NavMeshObstacleState snapshot = snapshots[i];
+                NavMeshObstacle obstacle = snapshot != null ? snapshot.Obstacle : null;
+                if (obstacle == null)
+                    continue;
+                try
+                {
+                    obstacle.carving = snapshot.Carving;
+                    obstacle.carveOnlyStationary = snapshot.CarveOnlyStationary;
+                    obstacle.shape = snapshot.Shape;
+                    obstacle.center = snapshot.Center;
+                    obstacle.size = snapshot.Size;
+                    obstacle.carvingMoveThreshold = snapshot.CarvingMoveThreshold;
+                    obstacle.carvingTimeToStationary = snapshot.CarvingTimeToStationary;
+                    obstacle.enabled = snapshot.Enabled;
+                }
+                catch
+                {
+                }
             }
         }
 
@@ -2098,10 +2895,18 @@ namespace UltrakillTAS
                 Animator = animator,
                 Enabled = animator.enabled,
                 Speed = animator.speed,
+                UpdateMode = animator.updateMode,
+                CullingMode = animator.cullingMode,
+                ApplyRootMotion = animator.applyRootMotion,
                 LayerCount = layerCount,
                 StateHashes = new int[layerCount],
                 NormalizedTimes = new float[layerCount],
-                LayerWeights = new float[layerCount]
+                LayerWeights = new float[layerCount],
+                NextStateHashes = new int[layerCount],
+                NextNormalizedTimes = new float[layerCount],
+                TransitionNormalizedTimes = new float[layerCount],
+                TransitionDurations = new float[layerCount],
+                InTransition = new bool[layerCount]
             };
             for (int layer = 0; layer < layerCount; layer++)
             {
@@ -2111,6 +2916,16 @@ namespace UltrakillTAS
                 // clip at the first frame when the sequence enables it again.
                 snapshot.NormalizedTimes[layer] = active ? info.normalizedTime : 0f;
                 snapshot.LayerWeights[layer] = animator.GetLayerWeight(layer);
+                snapshot.InTransition[layer] = animator.IsInTransition(layer);
+                if (snapshot.InTransition[layer])
+                {
+                    AnimatorStateInfo next = animator.GetNextAnimatorStateInfo(layer);
+                    AnimatorTransitionInfo transition = animator.GetAnimatorTransitionInfo(layer);
+                    snapshot.NextStateHashes[layer] = next.fullPathHash;
+                    snapshot.NextNormalizedTimes[layer] = next.normalizedTime;
+                    snapshot.TransitionNormalizedTimes[layer] = transition.normalizedTime;
+                    snapshot.TransitionDurations[layer] = transition.duration;
+                }
             }
 
             if (includeParameters)
@@ -2157,6 +2972,9 @@ namespace UltrakillTAS
                 if (animator.enabled != snapshot.Enabled)
                     animator.enabled = snapshot.Enabled;
                 animator.speed = snapshot.Speed;
+                animator.updateMode = snapshot.UpdateMode;
+                animator.cullingMode = snapshot.CullingMode;
+                animator.applyRootMotion = snapshot.ApplyRootMotion;
             }
             catch
             {
@@ -2196,6 +3014,19 @@ namespace UltrakillTAS
                                     animator.SetTrigger(parameter.NameHash);
                                 break;
                         }
+                    }
+                }
+                if (snapshot.InTransition != null)
+                {
+                    for (int layer = 0; layer < layers; layer++)
+                    {
+                        if (!snapshot.InTransition[layer] || snapshot.NextStateHashes == null ||
+                            snapshot.NextStateHashes[layer] == 0)
+                            continue;
+                        float remaining = Mathf.Clamp01(1f - snapshot.TransitionNormalizedTimes[layer]);
+                        float duration = Mathf.Max(0.01f, snapshot.TransitionDurations[layer] * remaining);
+                        animator.CrossFade(snapshot.NextStateHashes[layer], duration, layer,
+                                           snapshot.NextNormalizedTimes[layer]);
                     }
                 }
                 animator.Update(0f);
@@ -3636,8 +4467,12 @@ namespace UltrakillTAS
         /// Scripts that live outside every other category but hold damage timing: a FireZone's
         /// and a BurningVoxel's HurtCooldownCollection decides when the fire hurts next.
         /// </summary>
-        static readonly string[] ExtraComponentTypeNames = { "FireZone", "BurningVoxel" };
-        readonly List<Type> _extraTypes = new List<Type>(2);
+        static readonly string[] ExtraComponentTypeNames =
+        {
+            "FireZone", "BurningVoxel", "Flammable", "Wet", "Water",
+            "StainVoxelManager", "VoxelProxy", "UnderwaterController", "DryZoneController"
+        };
+        readonly List<Type> _extraTypes = new List<Type>(16);
 
         void CaptureExtraComponents(Savestate state)
         {
@@ -3662,7 +4497,19 @@ namespace UltrakillTAS
                     {
                         ComponentSnapshot snapshot = CaptureComponent(component, RefCap);
                         if (snapshot != null)
+                        {
+                            // Never clone the singleton voxel manager: its template would carry
+                            // the whole map graph and could be mistaken for a live manager.
+                            if (component.GetType().Name != "StainVoxelManager")
+                                snapshot.Template = GetOrCreateTemplate(component, component.gameObject);
+                            snapshot.HasTemplate = snapshot.Template != null;
+                            snapshot.Parent = component.transform.parent;
+                            snapshot.LocalPosition = component.transform.localPosition;
+                            snapshot.LocalRotation = component.transform.localRotation;
+                            snapshot.ActiveSelf = component.gameObject.activeSelf;
+                            snapshot.HasPose = true;
                             state.ExtraComponents.Add(snapshot);
+                        }
                     }
                     catch (Exception ex)
                     {
@@ -3692,11 +4539,21 @@ namespace UltrakillTAS
             for (int i = 0; i < state.ExtraComponents.Count; i++)
             {
                 ComponentSnapshot snapshot = state.ExtraComponents[i];
-                // Fires burn out on their own; one that is gone is not reported as missing.
-                if (snapshot == null || Resolve(snapshot.Component) == null)
+                if (snapshot == null)
                     continue;
+                Component component = Resolve(snapshot.Component);
+                if (component == null)
+                {
+                    component = RebuildExtraComponent(snapshot);
+                    if (component == null)
+                    {
+                        missing++;
+                        continue;
+                    }
+                }
                 try
                 {
+                    snapshot.Component = component;
                     RestoreComponent(snapshot);
                     restored++;
                 }
@@ -3705,6 +4562,98 @@ namespace UltrakillTAS
                     _plugin.LogWarning("Loose script restore skipped: " + ex.Message);
                 }
             }
+            if (state.ExtraComponents.Count > 0)
+                SweepExtraComponents(state);
+        }
+
+        /// <summary>First component of the named type anywhere under the object.</summary>
+        static Component FindComponentByName(GameObject root, string typeName)
+        {
+            if (root == null || string.IsNullOrEmpty(typeName))
+                return null;
+            Component[] components = root.GetComponentsInChildren<Component>(true);
+            for (int i = 0; i < components.Length; i++)
+            {
+                Component component = components[i];
+                if (component != null && component.GetType().Name == typeName)
+                    return component;
+            }
+            return null;
+        }
+
+        Component RebuildExtraComponent(ComponentSnapshot snapshot)
+        {
+            if (snapshot == null || !snapshot.HasTemplate || snapshot.Template == null ||
+                string.IsNullOrEmpty(snapshot.TypeName))
+                return null;
+            GameObject instance;
+            try
+            {
+                instance = UnityEngine.Object.Instantiate(snapshot.Template);
+            }
+            catch
+            {
+                return null;
+            }
+            try
+            {
+                if (snapshot.HasPose)
+                {
+                    instance.transform.SetParent(snapshot.Parent, false);
+                    instance.transform.localPosition = snapshot.LocalPosition;
+                    instance.transform.localRotation = snapshot.LocalRotation;
+                }
+                instance.SetActive(snapshot.ActiveSelf);
+                Component component = FindComponentByName(instance, snapshot.TypeName);
+                if (component == null)
+                {
+                    UnityEngine.Object.Destroy(instance);
+                    return null;
+                }
+                snapshot.Component = component;
+                return component;
+            }
+            catch
+            {
+                UnityEngine.Object.Destroy(instance);
+                return null;
+            }
+        }
+
+        void SweepExtraComponents(Savestate state)
+        {
+            if (state.ExtraComponents == null || _plugin.SavestateCleanupSpawned == null ||
+                !_plugin.SavestateCleanupSpawned.Value)
+                return;
+            HashSet<int> saved = new HashSet<int>();
+            for (int i = 0; i < state.ExtraComponents.Count; i++)
+            {
+                Component component = state.ExtraComponents[i].Component;
+                if (component != null)
+                    saved.Add(component.GetInstanceID());
+            }
+            int removed = 0;
+            for (int t = 0; t < _extraTypes.Count; t++)
+            {
+                string typeName = _extraTypes[t].Name;
+                if (typeName == "StainVoxelManager" || typeName == "VoxelProxy")
+                    continue;
+                UnityEngine.Object[] found;
+                try { found = UnityEngine.Object.FindObjectsOfType(_extraTypes[t], true); }
+                catch { continue; }
+                for (int i = 0; i < found.Length; i++)
+                {
+                    Component component = found[i] as Component;
+                    if (component == null || saved.Contains(component.GetInstanceID()) ||
+                        IsTemplateClone(component.gameObject) || IsToolOrPlayerObject(component.gameObject) ||
+                        IsUnderEnemy(component.transform))
+                        continue;
+                    UnityEngine.Object.Destroy(component);
+                    removed++;
+                }
+            }
+            if (removed > 0)
+                _plugin.LogInfo("Savestate removed " + removed + " fire/fluid component(s) created after the save.");
         }
 
         // ------------------------------------------------------------------

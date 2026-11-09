@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>UKTAS Guide</title>
-<meta name="description" content="Beginner guide and full reference for UKTAS 1.2.0, the ULTRAKILL TAS tool: what TAS is, your first 10 minutes, recording, savestates, the HUD, troubleshooting, the brute-force optimizer, video recording, and the complete .uktas script format.">
+<meta name="description" content="Beginner guide and full reference for UKTAS 1.2.0, the ULTRAKILL TAS tool: what TAS is, your first 10 minutes, recording, exact savestates, the HUD, Performance Render Mode, troubleshooting, the sweep/ML optimizer, video recording, and the complete .uktas script format.">
 <style>
 :root{--bg:#0a0b0f;--bg2:#0c0e14;--panel:#141821;--panel2:#1a1f2b;--line:#252b38;--line2:#333b4c;--fg:#e9e7e3;--muted:#98a1b3;--accent:#ff5c5c;--accent2:#ffb547;--ok:#5ee6c4;--warn:#ffb547;--err:#ff8080;--c1:#5ee6c4;--c2:#7db7ff;--c3:#ff9f5e;--c4:#d9a7ff;--c5:#ffe066;--c6:#ff7aa2;--c7:#9be37a;--c8:#c4c8d0;--r:12px;--mono:ui-monospace,SFMono-Regular,"Cascadia Mono","IBM Plex Mono",Consolas,monospace;--sans:system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;color-scheme:dark}
 /* Dark is the base and the default. Light applies when the user picks Light, or picks System on a light system. */
@@ -340,11 +340,13 @@ main p code,main li code,main dd code,.note code,.big-warn code{overflow-wrap:an
     <div class="navgroup">
       <div class="glabel">Runtime</div>
       <a class="navlink" href="#savestates">Savestates</a>
+      <a class="navlink" href="#player-load-hold">V1 load hold</a>
       <a class="navlink" href="#menus">Menus &amp; boot</a>
       <a class="navlink" href="#checkpoints">Checkpoints &amp; FFF</a>
       <a class="navlink" href="#hud">HUD &amp; speedometer</a>
       <a class="navlink" href="#hud-facing">Facing &amp; cardinal axis readout</a>
       <a class="navlink" href="#freecam-body">V1 playermodel in freecam</a>
+      <a class="navlink" href="#performance-render">Performance Render Mode</a>
       <a class="navlink" href="#video-recording">Video recording &amp; FFmpeg commands</a>
       <a class="navlink" href="#baking">Baking</a>
     </div>
@@ -352,6 +354,8 @@ main p code,main li code,main dd code,.note code,.big-warn code{overflow-wrap:an
       <div class="glabel">Optimizer</div>
       <a class="navlink" href="#optimizer">Optimizer overview</a>
       <a class="navlink" href="#optim-tab">Optimizer tab &amp; controls</a>
+      <a class="navlink" href="#optim-strategy">Search strategies &amp; Adaptive ML</a>
+      <a class="navlink" href="#optim-geometry">Obstacle &amp; corner awareness</a>
       <a class="navlink" href="#optim-boxes">Freecam spatial boxes (Goal, Keep-out, Waypoint)</a>
       <a class="navlink" href="#optim-aimlock">Projectile &amp; coin aim lock</a>
       <a class="navlink" href="#optim-paths">Trajectories &amp; saving branches</a>
@@ -370,6 +374,7 @@ main p code,main li code,main dd code,.note code,.big-warn code{overflow-wrap:an
     </div>
     <div class="meta">
       <b>UKTAS 1.2.0</b> (plugin version)<br>
+      <a href="https://github.com/snokthelegend/UKTAS/blob/main/CHANGELOG.md">Changelog</a><br>
       Script header: <code>version 1</code><br>
       8 pipe-separated fields, BunnyMod XT layout
     </div>
@@ -563,7 +568,7 @@ main p code,main li code,main dd code,.note code,.big-warn code{overflow-wrap:an
           <tr><td>Frame Editor</td><td>Edit the framebulk at the current tick with buttons: Split Bulk, Duplicate, Merge identical, Insert Framebulk, Save to Disk.</td></tr>
           <tr><td>Startup</td><td>Script start behaviour, autoload a script at game start, weapons and loadout (Copy loadout, Write to script header).</td></tr>
           <tr><td>Keybinds</td><td>Rebind every hotkey. Menu keys. Input injection, including "Block gameplay input while this window is open".</td></tr>
-          <tr><td>Overlays</td><td>HUD panel lines, Visuals (hitboxes, triggers, viewmodels, freecam), HUD layout, Speedometer, Paused label, Determinism (seeded RNG, start state, savestate cleanup, pause on scene change), Startup (autoload, record file, default seed), Player trajectory.</td></tr>
+          <tr><td>Overlays</td><td>HUD panel lines, Visuals (hitboxes, triggers, viewmodels, freecam), Performance rendering (shadows, post-processing, particles, decals, engine quality), HUD layout, Speedometer, Paused label, Determinism (seeded RNG, start state, savestate cleanup, pause on scene change), Startup (autoload, record file, default seed), Player trajectory.</td></tr>
           <tr><td>Branches</td><td>Route projects (<code>.uktasproj</code>): several routes of one run, and Fork at current time.</td></tr>
           <tr><td>Recording</td><td>Render the run to a video file. Needs <code>ffmpeg.exe</code> (see <a href="#video">Video</a>).</td></tr>
           <tr><td>Diagnostics</td><td>A report for bug reports. Save report writes <code>diagnostics.txt</code> in the script folder.</td></tr>
@@ -608,6 +613,7 @@ main p code,main li code,main dd code,.note code,.big-warn code{overflow-wrap:an
         </tbody>
       </table></div>
       <div class="note"><b>Which savestate slot do F8 / F9 use?</b> The <b>active slot</b>. Set it in the General tab, card <b>Savestates</b>, box <b>Active slot</b> (0 to 9). The same value is the config setting <code>Active savestate slot</code>. The card also has <b>Save slot</b> and <b>Load slot</b> buttons. Savestates live in memory only: they are lost when the game closes, and they belong to the level they were made in.</div>
+      <div class="note"><b>Reset arenas on load.</b> A savestate taken before an arena trigger can be re-fought without the checkpoint option: ULTRAKILL destroys <code>ActivateArena</code> once it spawns the first wave and destroys each <code>ActivateNextWave</code> when its wave ends, so the load re-adds those scripts from the captured level elements, runs the game's own <code>Arena.AutoSetupWaves</code> to rewire the doors and waves, resets the counters and switches the wave enemies off. Walk back into the trigger and the fight starts again. Mid-fight and post-fight states have no trigger to rebuild and are left alone; rewinds and optimizer restores never do this. The same card has <b>Load the last map checkpoint before a savestate</b> (off by default; config <code>Load map checkpoint on savestate load</code>). With it on, a slot load or a norefresh resume first reloads the level exactly like the pause menu's CHECKPOINT button: <code>StatsManager.Restart</code> ends the arena music, fires <code>checkpointRestart</code>, counts the restart and respawns at the last checkpoint banner you touched, so rooms, arenas, doors and checkpoint-scoped objects go back to their pre-fight state before the saved values are written. With the setting on, the pause menu's own <b>CHECKPOINT</b> button also does this: the game loads its checkpoint, then the active savestate is restored on top of it. A savestate load triggers the same reload and applies the savestate two frames later, after Unity has flushed the game's deferred destruction of the old room clones. The freshly rebuilt rooms are then excluded from the load's orphan sweep, so the reload's own enemies and hazards are not deleted by the load that follows. It is skipped when the level has no checkpoint yet or is already finished, and rewinds and optimizer restores never use it.</div>
     </section>
 
     <section id="firstscript">
@@ -787,6 +793,7 @@ look_at off</pre>
       </div>
       <h3 id="version">About the version numbers</h3>
       <p>The tool is <b>UKTAS 1.2.0</b>; that is the plugin version shown in the "loaded" message. The script file format is <b>version 1</b>; that is the <code>version 1</code> line at the top of every script. They are separate numbers.</p>
+      <p>Release notes and the full list of changes are in <a href="https://github.com/snokthelegend/UKTAS/blob/main/CHANGELOG.md">CHANGELOG.md</a>.</p>
     </section>
 
     <!-- ================================================================ FORMAT REFERENCE -->
@@ -867,7 +874,7 @@ description Act 1 any%: no damage</pre>
             <tr><td><code>difficulty</code></td><td><code>harmless</code> · <code>lenient</code> · <code>standard</code> · <code>violent</code> · <code>brutal</code>, or <code>0</code>–<code>4</code></td><td>Sets the difficulty at Play, before the start scene loads and before the start state is captured, through the game's <code>PrefsManager.SetInt("difficulty", n)</code> — what the difficulty menu does. It stays set afterwards.</td></tr>
             <tr><td><code>wait_for_control</code></td><td><code>true</code> / <code>false</code>, default <code>true</code></td><td>Holds tick 1 until <code>NewMovement.activated</code> is true (elevator drops, intros), then waits the configured settle frames. Ignored when there is no player (title screen, boot).</td></tr>
             <tr><td><code>load_command</code></td><td>semicolon-separated commands</td><td>Runs once, before frame 1.</td></tr>
-            <tr><td><code>fist</code></td><td><code>knuckleblaster</code> · <code>parry</code></td><td>Equips that fist before tick 0 (after the wait for control) through <code>FistControl.ForceArm</code>, so the run does not depend on the fist the player had out. <code>parry</code> is the Feedbacker. The equipped arm is captured in savestates, so rewinds keep it.</td></tr>
+            <tr><td><code>fist</code></td><td><code>knuckleblaster</code> · <code>parry</code></td><td>Equips that fist before tick 0 (after the wait for control) through <code>FistControl.ForceArm</code>, so the run does not depend on the fist the player had out. <code>parry</code> is the Feedbacker. The equipped arm is captured in savestates, so rewinds keep it. Not part of a bake block's hash; use a <code>fist</code> special frame to change arms mid-script.</td></tr>
             <tr><td><code>weapons</code></td><td>keys, space or comma separated, or <code>none</code></td><td>The gear the player owns for the run. Applied at Play in memory only — no save file is touched.</td></tr>
             <tr><td><code>loadout</code></td><td><code>&lt;field&gt;=&lt;b&gt;&lt;r&gt;&lt;g&gt;</code> tokens</td><td>Forced-loadout variants, written into the game's live <code>ForcedLoadout</code> at Play.</td></tr>
             <tr><td><code>demo</code> · <code>save</code> · <code>author</code> · <code>description</code></td><td>free text / file name</td><td>Optional metadata.</td></tr>
@@ -919,7 +926,7 @@ weapons rev0 rev1 sho0 nai0 rai0 rock0 arm1</pre>
       <pre>loadout revolver=iii altRevolver=ixx arm=iii</pre>
       <p class="small">Missing fields keep the game's value. A malformed token is a parse error. Omitted: the current loadout is kept. Part of the norefresh checksum <b>only when set</b>. The Startup tab's <em>Copy loadout</em> / <em>Write to script header</em> produces both lines from the running game.</p>
 
-      <div class="note ok"><b>fist and weapons also change the checksum.</b> <code>fist</code> is always part of the norefresh checksum; <code>difficulty</code>, <code>weapons</code> and <code>loadout</code> only count when the key is present.</div>
+      <div class="note ok"><b>fist and weapons also change the checksum.</b> <code>fist</code> is always part of the norefresh checksum; <code>difficulty</code>, <code>weapons</code> and <code>loadout</code> only count when the key is present. Bake hashes are different: the <code>fist</code> header and mid-script <code>fist</code> rows are left out so adding them does not force a re-bake.</div>
     </section>
 
     <section id="bulk">
@@ -927,18 +934,18 @@ weapons rev0 rev1 sho0 nai0 rai0 rock0 arm1</pre>
       <pre><span class="f1">autofuncs</span><span class="bar">|</span><span class="f2">movement</span><span class="bar">|</span><span class="f3">actions</span><span class="bar">|</span><span class="f4">frametime</span><span class="bar">|</span><span class="f5">yaw</span><span class="bar">|</span><span class="f6">pitch</span><span class="bar">|</span><span class="f7">frames</span><span class="bar">|</span><span class="f8">commands</span></pre>
 
       <h3 id="autofuncs">Field 1 — autofuncs</h3>
-      <p>Ten characters, default <code>----------</code>. Each slot is a helper the tool applies for you; a letter turns it on, <code>-</code> leaves it off. The remaining slots are reserved.</p>
+      <p>Ten slots, default <code>----------</code>. Each slot is a helper the tool applies for you; a letter turns it on, <code>-</code> leaves it off. The SSJ macro also accepts a variant digit directly after <code>m</code> (<code>m1</code>), so that field is then eleven characters. The remaining slots are reserved.</p>
       <div class="keys" aria-label="Autofunc slots">
         <span class="key" style="opacity:.45">-<small>reserved</small></span>
         <span class="key act on">j<small>autojump</small></span>
-        <span class="key act">s<small>autoslide</small></span>
+        <span class="key act">s/S<small>autoslide</small></span>
         <span class="key act">d<small>autodash</small></span>
         <span class="key act">c<small>coin assist</small></span>
         <span class="key act">g<small>ground slam</small></span>
         <span class="key act">w<small>whiplash assist</small></span>
         <span class="key act">t<small>coin throw</small></span>
         <span class="key act">e<small>deadcoin</small></span>
-        <span class="key" style="opacity:.45">-<small>reserved</small></span>
+        <span class="key act">m0<small>ssj macro</small></span>
       </div>
       <div class="scroll">
         <table>
@@ -947,19 +954,20 @@ weapons rev0 rev1 sho0 nai0 rai0 rock0 arm1</pre>
             <tr><td>1</td><td><code>-</code></td><td>Reserved</td><td>Always <code>-</code>. (There is no auto-align helper; <code>a</code> is not a valid letter.)</td></tr>
             <tr><td>2</td><td><code>j</code></td><td>Autojump</td><td>Presses Jump on every grounded tick, so the jump comes on the landing tick. If the game's jump cooldown swallows a press, it presses again on the next grounded tick.</td></tr>
             <tr><td>3</td><td><code>s</code></td><td>Autoslide</td><td>Holds Slide on every grounded tick, starting with the landing tick, so the slide starts on the landing tick and lasts while V1 stays on the ground. It releases Slide on the first airborne tick, which ends the slide. Two exceptions, so jumps still work: it does not hold Slide on a tick where a Jump press goes through (from <code>j</code> or from <code>j</code> in field 3), and it does not start a new slide while the jump cooldown runs right after a jump (a slide that is already running stays held).</td></tr>
+            <tr><td>3</td><td><code>S</code></td><td>Spam autoslide</td><td>Uses the same grounded/jump/SSJ gate as <code>s</code>, but presses Slide only on alternate eligible ticks: one frame on, one frame off. The first eligible tick is an on tick; losing the gate resets the phase, so the next landing starts with a fresh press. A Slide the framebulk holds itself cannot be released by the autofunc. <code>S</code> is the only case-sensitive autofunc.</td></tr>
             <tr><td>4</td><td><code>d</code></td><td>Autodash</td><td>Presses Dash on the first tick a dash can start: the previous dash has ended and the dash meter holds a full bar (dash charge 100 or more). It does not dash while V1 is sliding, because a dash would end the slide.</td></tr>
             <tr><td>5</td><td><code>c</code></td><td>Coin aim assist</td><td>On a tick that fires (primary fire <code>1</code>), the view snaps to the nearest active coin that has not been shot yet, so the shot hits it. Alt fire (the coin toss) does not count as a fire tick. With no coin, the angles are left as they are.</td></tr>
             <tr><td>6</td><td><code>g</code></td><td>Ground slam</td><td>Holds Slide only while V1 is in the air, and only on ticks where the press would start a ground slam: no ground within 3 m below, the game's fall timer (<code>fallTime</code>) above 0.5, slam cooldown 0, no slam already running. So the slam starts on the first tick it is valid. On every other tick it releases Slide (within 2 m of the ground the press would start an air slide instead). It never holds Slide on the ground, so <code>g</code> never slides. Because Slide is released while the slam runs, the held-slam landing shockwave is not produced.</td></tr>
             <tr><td>7</td><td><code>w</code></td><td>Whiplash assist</td><td>When the hook is ready to throw (equipped, not pulling or returning, cooldown 0) and an active hook point is within 300 units with no wall in between, the view snaps to the hook point and Whiplash is pressed on that one tick. Skipped on a tick where <code>c</code> already aimed at a coin.</td></tr>
             <tr><td>8</td><td><code>t</code></td><td>Coin throw</td><td>Runs once, on the first tick of its framebulk, and sets that tick's view angles to the toss direction that keeps the coin closest to V1 for the longest <b>while the coin is still in the air</b>. It simulates the game's own toss: camera forward × 20 + camera up × 15 + V1's velocity, then gravity and the coin's rigidbody drag, while V1's own path is modelled from the current velocity (gravity while airborne). Ticks in which the coin would touch the level do not count — the game destroys the coin on contact — and each airborne tick scores <code>1/(1 + distance²)</code>, so hovering next to V1 beats drifting away and a longer stay keeps adding. The rest of the bulk keeps the solved angle. It only aims: alt fire (<code>2</code>) still throws the coin.</td></tr>
             <tr><td>9</td><td><code>e</code></td><td>Deadcoin</td><td>Detects instead of holding an aim: every tick it looks for an unshot coin in the air, with no other checks (no gun cooldown test, no line-of-sight test). If one exists it runs a <b>three-tick</b> sequence, because ULTRAKILL shoots along the camera it read on that frame: tick 1 turns the view to the coin, tick 2 presses primary fire while still looking at it, tick 3 touches nothing so the angle the script wrote is back. The turn only ever reaches the injected tick, never the script's held angle. It never presses alt fire: toss the follow-up coin yourself while the shot's chain resolves 0.1 s after the hit, and the new coin takes over the chain's power without being ricoshoted. One shot per framebulk holding <code>e</code>; a rewind arms it again.</td></tr>
-            <tr><td>10</td><td><code>-</code></td><td>Reserved</td><td>Always <code>-</code>.</td></tr>
+            <tr><td>10</td><td><code>m</code></td><td>SSJ macro</td><td>Plays the <a href="#optim-ssj">Super Slide Jump</a> pattern for you: on the landing tick it holds Slide for <b>one tick</b>, releases it on the next tick (neither Slide nor Jump), then presses Jump on the tick after that. That is the 3-tick <code>m</code>/<code>m0</code> pattern and gives the full boost. <code>m1</code> waits one extra blank tick (4 ticks, half boost), <code>m2</code> waits two extra blank ticks (5 ticks, quarter boost), and <code>mN</code> waits N extra blank ticks. It never jumps on the release tick: that press would see frame 0 and be a plain jump. It starts the slide again on the landing tick, so the pattern repeats. It works together with <code>s</code> (during the release and blank ticks it stops the autoslide hold); a Slide the framebulk holds itself (field 2 <code>s</code>) cannot be released by an autofunc.</td></tr>
           </tbody>
         </table>
       </div>
       <div class="note"><b>With <code>s</code> and <code>j</code> both on,</b> the landing tick jumps instead of sliding: <code>j</code> presses Jump on that tick, and <code>s</code> does not hold Slide on a tick where the jump goes through.</div>
       <ul class="small">
-        <li>The letters may be written in any position and in upper or lower case; the tool writes them back in the slots above. Any other letter is a parse error.</li>
+        <li>Autofunc letters may be written in any position and are case-insensitive, except <code>S</code>: lowercase <code>s</code> is regular autoslide, uppercase <code>S</code> is spam autoslide. The tool writes each back in slot 3. Any other letter is a parse error.</li>
         <li>Autofuncs only <b>add</b> presses on top of the script's own input. A button the framebulk holds itself is never released by them.</li>
         <li>They act while a script plays, and on <kbd class="k">F6</kbd> steps of a paused script. They do nothing while recording or in plain frame stepping without a script.</li>
         <li>The angle that <code>c</code> or <code>w</code> snaps to is kept by later <code>-</code> angle columns, like <code>look_at</code>.</li>
@@ -1091,17 +1099,17 @@ weapons rev0 rev1 sho0 nai0 rai0 rock0 arm1</pre>
       <p class="small muted">Solid blocks are physics steps; dim blocks are ticks with no physics step.</p>
 
       <h3 id="timescale">Time scale</h3>
-      <p>The tool never writes <code>Time.timeScale</code>; ULTRAKILL owns it. A tick advances frametime × the game's current scale of game time, so the game's impact frames, weapon wheel, cutscene slow motion and assist game-speed slider all apply to ticks.</p>
+      <p>The tool never writes <code>Time.timeScale</code> while a TAS runs; ULTRAKILL owns it. A tick advances frametime × the game's current scale of game time, so the game's impact frames, weapon wheel, cutscene slow motion and assist game-speed slider all apply to ticks. The one exception is loading a savestate, which puts the captured scale back.</p>
       <p>Hitstop and parry stops (<code>TimeController.HitStop</code> / <code>TrueStop</code>) run their own body and set the scale to 0 themselves. The tool only replaces their <code>WaitForSecondsRealtime</code> with a per-tick timer that calls the game's <code>ContinueTime</code>, so a stop ends on the same tick at any playback speed.</p>
       <div class="grid g2">
         <div class="card"><h4>While a TAS runs</h4><p>Every rendered frame is one tick, and the render rate is capped to <code>speed / host_frametime</code>. A paused or held frame is armed with an almost-zero <code>captureDeltaTime</code> instead of being frozen by the scale.</p></div>
-        <div class="card"><h4>Savestates</h4><p>Loading a savestate never writes the scale. A live stop the loaded state does not continue is ended through the game's own <code>ContinueTime</code>.</p></div>
+        <div class="card"><h4>Savestates</h4><p>A load restores the saved <code>Time.timeScale</code>, so a state taken in slow motion or at an assist speed comes back at that speed. A state taken inside a hitstop keeps scale 0 and its remaining stop ticks; a live stop the loaded state does not continue is ended through the game's own <code>ContinueTime</code>.</p></div>
       </div>
     </section>
 
     <section id="special">
       <div class="shead"><span class="num">04</span><h2>Special frames</h2><span class="sub">lines without pipes</span></div>
-      <p>These lines sit between framebulks inside the frames section and are <b>not merged</b> by auto-bulking. <code>change</code>, <code>ff</code>, <code>norefresh</code>, <code>FFF</code> and <code>look_at</code> take no ticks. <code>save</code>, <code>seed</code> and <code>target_yaw</code> each take <b>one tick</b> of their own, on which the previous framebulk's input stays held. The keywords are not case-sensitive.</p>
+      <p>These lines sit between framebulks inside the frames section and are <b>not merged</b> by auto-bulking. <code>change</code>, <code>fist</code>, <code>ff</code>, <code>norefresh</code>, <code>FFF</code> and <code>look_at</code> take no ticks. <code>save</code>, <code>seed</code> and <code>target_yaw</code> each take <b>one tick</b> of their own, on which the previous framebulk's input stays held. The keywords are not case-sensitive.</p>
       <div class="scroll">
         <table>
           <thead><tr><th style="width:34%">Line</th><th>Effect</th></tr></thead>
@@ -1111,6 +1119,7 @@ weapons rev0 rev1 sho0 nai0 rai0 rock0 arm1</pre>
             <tr><td><code>change yaw to &lt;deg&gt; over &lt;t&gt; s</code></td><td>Smooth change that runs alongside the framebulks after it.</td></tr>
             <tr><td><code>change pitch to &lt;deg&gt; over &lt;t&gt; s</code></td><td>The same for pitch.</td></tr>
             <tr><td><code>target_yaw &lt;deg&gt;</code></td><td>Absolute view target.</td></tr>
+            <tr><td><code>fist &lt;arm&gt;</code></td><td>Select <code>parry</code> or <code>knuckleblaster</code> on the next framebulk. Reads the live arm and injects the normal <code>x</code> change-fist action only when the other arm is out; no input when it is already equipped.</td></tr>
             <tr><td><code>ff</code></td><td>Fast-forward up to this line.</td></tr>
             <tr><td><code>norefresh [label]</code></td><td>A checkpoint. Play can resume here from a cached state instead of replaying everything above. <a href="#checkpoints">Details</a></td></tr>
             <tr><td><code>FFF</code></td><td>Fast-forward breakpoint: every tick above it runs with no 3D rendering, as fast as the CPU allows; rendering returns right after it. Alone on its line. <a href="#checkpoints">Details</a></td></tr>
@@ -1119,10 +1128,18 @@ weapons rev0 rev1 sho0 nai0 rai0 rock0 arm1</pre>
             <tr><td><code>look_at &lt;x&gt; &lt;y&gt; &lt;z&gt;</code></td><td>Aim at a fixed world coordinate.</td></tr>
             <tr><td><code>look_at off</code></td><td>Stop aiming.</td></tr>
             <tr><td><code>bake_start [name]</code></td><td>Open a bake block (takes no ticks). <a href="#baking">See Baking</a>. <span class="tag-bad">Baked playback is not legitimate.</span></td></tr>
+            <tr><td><code>bake_start_nme [name]</code></td><td>Open a bake block without doors or streamed map rooms; those stay live. <a href="#baking">See Baking</a>. <span class="tag-bad">Baked playback is not legitimate.</span></td></tr>
             <tr><td><code>bake_end</code></td><td>Close the open bake block (takes no ticks, nothing else on the line).</td></tr>
           </tbody>
         </table>
       </div>
+
+      <h3 id="fistline">fist &lt;arm&gt;</h3>
+      <p>Takes no ticks and starts on the first tick of the next framebulk. It reads the arm that is actually equipped, and if the requested one is not out it adds the game's normal <code>x</code> change-fist press to that tick. If the requested arm is already out, it adds nothing. The press lasts one tick only, so a following special frame does not swap again. Unlike the header <code>fist</code>, this uses the normal <code>x</code> action rather than <code>ForceArm</code>. <code>fist</code> rows are not part of a bake block's hash, so adding one does not force a re-bake.</p>
+      <pre><span class="cmt"># swap from either arm to the Knuckleblaster, then punch on the next tick</span>
+fist knuckleblaster
+<span class="f1">----------</span><span class="bar">|</span><span class="f2">f-----</span><span class="bar">|</span><span class="f3">------</span><span class="bar">|</span><span class="f4">0.008</span><span class="bar">|</span><span class="f5">0.0</span><span class="bar">|</span><span class="f6">-</span><span class="bar">|</span><span class="f7">1</span><span class="bar">|</span>
+<span class="f1">----------</span><span class="bar">|</span><span class="f2">f-----</span><span class="bar">|</span><span class="f3">--p---</span><span class="bar">|</span><span class="f4">0.008</span><span class="bar">|</span><span class="f5">0.0</span><span class="bar">|</span><span class="f6">-</span><span class="bar">|</span><span class="f7">1</span><span class="bar">|</span></pre>
 
       <h3 id="change">change yaw / change pitch</h3>
       <p>The line takes no ticks, like norefresh. It starts on the first tick of the next framebulk and moves that angle in a straight line to <code>&lt;deg&gt;</code> over <code>&lt;t&gt;</code> seconds of script time, landing exactly on the target on the last tick. The framebulks keep running normally while it does (movement, actions, commands), and it carries across as many bulks as the time covers.</p>
@@ -1151,9 +1168,13 @@ change pitch to 0 over 0.4 s
           <ul>
             <li>Takes no ticks. The label is optional text.</li>
             <li>When playback reaches the line, the tool caches the game state there (in memory).</li>
+            <li>The cached state stores the checkpoint tick, script time/path and fixed-step phase. Play resumes at that tick exactly once instead of guessing the boundary.</li>
+            <li>V1 is held by the exact load freeze until the first resumed tick, so the checkpoint is not disturbed between the restore and its input.</li>
             <li>Next time you press Play, it skips straight to the last valid checkpoint instead of replaying everything above it.</li>
             <li>A checkpoint is valid only while the header and every line above it are unchanged (comments and spaces do not count), and the same level instance is loaded.</li>
             <li>Setting: <b>Use norefresh checkpoints</b> (General tab, card "Fast-forward (NoRefresh)"; on by default). <b>Clear norefresh cache</b> forgets them all.</li>
+            <li>Debug: the card's <b>Capture offset</b> slider picks which tick the state is cached on, relative to the marker (0 is the marker's own tick, +1 caches a tick earlier and resumes further behind the script, -1 a tick later and further ahead). Changing it clears the cache so the next Play re-captures.</li>
+            <li><b>Bake the first frames after a checkpoint</b> (same card, off by default): caching a checkpoint also records the next ticks into a temporary <code>.ukbake</code> in the temp folder, stamped with the script's own hash over that tick range. A resume writes those baked frames over the same ticks first, so the run re-syncs to the recorded trajectory, then continues live. The window is the <b>Sync bake ticks</b> slider (default 30); on a resume, the bake block the checkpoint lands in is also closed automatically when that window ends, as if a <code>bake_end</code> stood there, and the rest of the block plays live. Editing the frames right after the marker changes the hash, so the resume ignores the stale bake. The script and its <code>.ukbake</code> files are never modified; applying baked state marks the run as not submittable.</li>
           </ul>
         </div>
         <div class="card">
@@ -1168,6 +1189,7 @@ change pitch to 0 over 0.4 s
           </ul>
         </div>
       </div>
+      <p class="small muted">With the determinism trace enabled, the caching run writes a <code>checkpoint</code> row and the resume writes a <code>restored</code> row. The restored row is compared in memory against the checkpoint at the same tick: player position, velocity, camera, model and live fixed-step phase, RNG state and grounded flag. The first mismatch is reported in the log instead of waiting for the run to drift.</p>
       <pre><span class="cmt">// the boring start runs headless, then you watch from here</span>
 ----------<span class="bar">|</span>f-----<span class="bar">|</span>------<span class="bar">|</span>-<span class="bar">|</span>-<span class="bar">|</span>-<span class="bar">|</span>800<span class="bar">|</span>
 FFF
@@ -1329,18 +1351,30 @@ norefresh after_corridor
 
       <h3 id="captured">What is captured</h3>
       <div class="stack">
-        <div class="card"><h4>Player</h4><p>Transform, Rigidbody (gravity, constraints, drag, sleep; velocity only when not kinematic), every <code>NewMovement</code> field (dash charge, slide length, slam force, jump/slide timers), camera angles.</p></div>
-        <div class="card"><h4>Player rig</h4><p>Every ULTRAKILL script under the player, camera, <code>GunControl</code> and <code>FistControl</code>: Revolver, Shotgun, Nailgun, Railcannon, RocketLauncher (charges, heat, cooldowns), Punch/FistControl, <code>WeaponCharges</code> (including its cooldown arrays), ground/wall checks, the whiplash hook. Plus the active flag of every weapon/fist object, colliders, Animators (layers, normalized time, parameters, speed, enabled), particle systems and audio sources (playing state and position).</p></div>
-        <div class="card"><h4>Enemies</h4><p>Every <code>EnemyIdentifier</code>, including inactive ones. For living enemies: all game scripts on the enemy (attack cooldowns, state enums, targets), health, bleed, all Animators, colliders, particles, Rigidbody, and the <code>NavMeshAgent</code> (speed, acceleration, stopping distance, path). Dead or dormant enemies keep identity, pose, active flag and identifier fields.</p></div>
+        <div class="card"><h4>Player</h4><p>V1's world transform, local pose and local scale; Rigidbody pose, velocity, angular velocity, gravity, constraints, drag and sleep state; every <code>NewMovement</code> field (dash charge, slide length and direction, slam force, jump/slide timers, <code>framesSinceSlide</code>, grounded/can-jump); the collision capsule's exact shape; camera pitch/yaw; every animator state; and the player's audio/particle state. Values are stored as Unity's floats and as widened <code>double</code> copies, so a load writes back the captured bits rather than a re-derived value.</p></div>
+        <div class="card"><h4>Player rig</h4><p>Every ULTRAKILL script under the player, camera, <code>GunControl</code> and <code>FistControl</code>: Revolver, Shotgun, Nailgun, Railcannon, RocketLauncher (charges, heat, cooldowns, napalm fuel and spray state), Punch/FistControl, <code>WeaponCharges</code> (including its cooldown arrays), ground/wall checks, the whiplash hook. Plus the active flag of every weapon/fist object, colliders, Animators (layers, normalized time, parameters, speed, enabled), live particle buffers and audio sources (playing state and position).</p></div>
+        <div class="card"><h4>Enemies</h4><p>Every <code>EnemyIdentifier</code>, including inactive, dormant and dead ones. All game scripts on the enemy (attack cooldowns, state enums, targets, child rigs), health, bleed, every Animator with layer/transition/root-motion state, colliders, particle systems with their module configuration, audio sources, Rigidbody state, and every <code>NavMeshAgent</code> and <code>NavMeshObstacle</code> (speed, acceleration, radius, height, avoidance, stopping distance, path, enabled state). A dormant arena actor can wake without replaying from an empty AI state, and a dead ragdoll can be revived or gibbed consistently.</p></div>
+        <div class="card"><h4>Fire, oil and fluids</h4><p>Firestarter napalm fuel and spray state, <code>GasolineProjectile</code> droplets, every ground <code>GasolineStain</code> (pose, size, parent, renderer and template), the <code>StainVoxelManager</code> ignition/explosion queues and propagation tick, <code>Flammable</code> fuel/heat/burning/wet state, <code>FireZone</code> and <code>BurningVoxel</code> damage timers and coroutines, <code>Water</code> volumes and their rigidbody/entry lists, <code>Wet</code> wetness, the under-water and dry-zone controllers, and rebuilds for fire/fluid components destroyed after the save.</p></div>
         <div class="card"><h4>Doors</h4><p><code>Door</code> fields, open/locked/progress flags, BigDoor/SubDoor leaves, handles, <code>NavMeshObstacle</code>, lights, Rigidbody.</p></div>
         <div class="card"><h4>Map elements</h4><p><code>ObjectActivator</code>, arenas and waves, checkpoints, elevators, platforms, pistons, rotators, switches, breakables, glass, torches, hook points, items, boss bars (fields, enabled, pose, parent), and the active state of every object their triggers or UnityEvents switch.</p></div>
         <div class="card"><h4>Projectiles</h4><p>Coin, Projectile, Nail, Harpoon, Grenade/rocket, Cannonball, Magnet, Explosion, beams.</p></div>
-        <div class="card"><h4>Randomness</h4><p>The <code>UnityEngine.Random</code> state and the tracked <code>System.Random</code> state.</p></div>
+        <div class="card"><h4>Effects and coroutines</h4><p>Trail and line renderers (positions and material settings), audio filter state, live particle buffers and module settings, and the coroutine instances tracked at capture. A load restores the tracked coroutines instead of leaving stale ones running or missing ones stopped.</p></div>
+        <div class="card"><h4>Randomness, input and physics</h4><p>The <code>UnityEngine.Random</code> state, every tracked <code>System.Random</code>, every <code>Unity.Mathematics.Random</code> field on a game script (not just <code>SeaBodies</code>), each particle system's seed/auto-seed flag, the full <code>InputSource</code> field state (held, analog and edge/timestamp data), the exact held buttons (with their press edge suppressed), the physics sub-step phase, global gravity/solver thresholds, <code>Physics.simulationMode</code> and the 32×32 layer-collision matrix.</p></div>
       </div>
+
+      <h3 id="player-load-hold">V1 load hold</h3>
+      <p>A savestate restore is not one assignment: enabling objects runs <code>OnEnable</code>, restarts coroutines, updates animators and writes dozens of components around the player. Any of that can move V1 or give his Rigidbody velocity after the player snapshot was written. The load path therefore freezes him before the first restore step:</p>
+      <ul>
+        <li>The Rigidbody is made kinematic and its velocity/angular velocity are zeroed.</li>
+        <li>The saved world pose, local pose and Rigidbody pose are re-applied after every restore step and at the end of every paused frame, so an <code>OnEnable</code>, animator update, weapon script or <code>PostRestore</code> cannot leave him a fraction of a unit off.</li>
+        <li>After the full restore, the exact pose, rotation, velocity, angular velocity, Rigidbody flags and sleep state, camera angles and animator state are written back. RNG is restored after that.</li>
+        <li>He stays pinned until the first attempted simulated tick, then the hold is released immediately before that tick's input and physics. Loading while Idle releases at the end of the load frame; stopping, a scene change or another load also releases the old hold.</li>
+      </ul>
+      <p class="small muted">Saving while a load hold is active temporarily releases it, captures the real dynamic body, then pins the new state again, so the slot never records a kinematic player with zero velocity.</p>
 
       <h3 id="timers">Timers</h3>
       <p>ULTRAKILL stores cooldowns as <code>TimeSince</code> — an absolute <code>Time.time</code> stamp. On load every stamp is shifted by <em>(now − Time.time at capture)</em>, so each cooldown keeps exactly its remaining time.</p>
-      <div class="note">Input System event timestamps (<code>slideTimestamp</code>, <code>jumpTimestamp</code>) run on a separate clock and are <b>not</b> restored.</div>
+      <div class="note">Input System event timestamps (<code>slideTimestamp</code>, <code>jumpTimestamp</code>) are captured with the surrounding <code>InputSource</code> fields. The later TAS input pass reinstates the held-button mask without generating new press edges.</div>
 
       <h3 id="invokes">Delayed calls</h3>
       <p>ULTRAKILL clears many states with <code>MonoBehaviour.Invoke</code> — <code>Jump()</code> sets jumping/jumpCooldown and schedules <code>NotJumping</code>/<code>JumpReady</code>. Those pending calls are not fields, so the tool reads each script's IL to learn which <code>Invoke("Name", delay)</code> calls it can schedule, records which are pending (<code>IsInvoking</code>) at capture, and on load cancels every such call and re-arms the saved ones.</p>
@@ -1353,20 +1387,19 @@ norefresh after_corridor
       <p>A Magnet keeps the sawblades, chainsaws, connected magnets and stuck enemies it holds in <code>List&lt;T&gt;</code> fields. Every <code>List&lt;T&gt;</code> whose items are Unity objects is captured as membership and restored (items destroyed since the save are skipped; projectile lists are restored after every projectile exists).</p>
 
       <h3 id="loaded">Loaded parts</h3>
-      <p>The state records which scenes are loaded and the rooms that doors stream on and off (<code>Door.activatedRooms</code> / <code>deactivatedRooms</code>), plus <code>RoomManager</code> and <code>RoomArea</code>. A room that was hidden at the save is hidden again on load. If a scene that was loaded at the save is gone now, the load reports it as missing and does not reopen it — reload the level first.</p>
-      <div class="note warn"><b>Limits.</b> The procedural room sequence (<code>RoomManager.visitedRooms</code>, a list of ints) is not restored yet, and additive scenes loaded after the save are left as they are.</div>
+      <p>The state records which scenes are loaded and the rooms that doors stream on and off (<code>Door.activatedRooms</code> / <code>deactivatedRooms</code>), plus the full <code>RoomManager.visitedRooms</code> sequence and <code>RoomArea</code>. A room that was hidden at the save is hidden again on load. If a scene that was loaded at the save is gone now, the load reports it as missing and does not reopen it — reload the level first. Additive scenes loaded after the save are unloaded asynchronously when “Savestate cleanup spawned objects” is on.</p>
 
       <h3 id="restore">Restore order</h3>
-      <p>Active flags first (so <code>OnEnable</code> runs), then values, then effects, then the RNG streams <b>last</b>, so nothing that wakes up during the load can disturb the restored random sequence. NavMesh paths are restored with a synchronous <code>CalculatePath</code> + <code>SetPath</code>, never a queued <code>SetDestination</code>.</p>
+      <p>Active flags first (so <code>OnEnable</code> runs), then values, then effects, then the RNG streams <b>last</b>, so nothing that wakes up during the load can disturb the restored random sequence. NavMesh paths are restored with a synchronous <code>CalculatePath</code> + <code>SetPath</code>, never a queued <code>SetDestination</code>. The saved timeline and fixed-step phase are part of the state: a load knows the tick, script time and script path it belongs to, and aligns Unity's physics phase before restoring.</p>
 
       <h3 id="orphans">Orphans</h3>
-      <p>Projectiles and enemies that did not exist at capture are destroyed (setting “Savestate cleanup spawned objects”, default on). Destroyed projectiles are recreated from an inactive template. Level objects that were destroyed (broken glass, gibbed enemies) are counted as missing.</p>
+      <p>Projectiles and enemies that did not exist at capture are destroyed (setting “Savestate cleanup spawned objects”, default on). Destroyed projectiles are recreated from an inactive template. A destroyed (gibbed or dissolved) enemy is rebuilt from its own template too: the whole saved hierarchy, state and root scale are written onto the new instance, and missing children are rebuilt by name so a limb the game removed after the save comes back in its saved slot. Level objects that were destroyed (broken glass) are counted as missing. Gore objects created after the save (gibs, severed limbs, blood pools, ragdolls) are removed, while objects that existed at capture are kept. Fire, fluid and stain components created after the save are removed the same way.</p>
 
       <h3 id="not-captured">Not captured</h3>
       <div class="chips">
-        <span class="chip" style="cursor:default">particles older than 6 s (left running)</span>
-        <span class="chip" style="cursor:default">audio on enemies</span>
-        <span class="chip" style="cursor:default">gore and blood decals</span>
+        <span class="chip" style="cursor:default">live particle buffers in light rolling-history entries (slots carry them)</span>
+        <span class="chip" style="cursor:default">native-only Unity internals with no public API: exact particle simulation accumulator, blend-tree transition weights, per-collider ignore pairs</span>
+        <span class="chip" style="cursor:default">exact gore geometry and blood decals (gore created after the save is removed; existing decals are not rebuilt)</span>
         <span class="chip" style="cursor:default">UI element values (the game recomputes them)</span>
       </div>
     </section>
@@ -1631,8 +1664,34 @@ rank A  restarts 0  challenge NO</pre>
       </ul>
     </section>
 
+    <section id="performance-render">
+      <div class="shead"><span class="num">10.6</span><h2 data-kw="performance render mode max fps shadows reflection probes post processing crt particles decals bullet holes pixel lights skinning particle raycasts msaa anisotropic">Performance Render Mode</h2><span class="sub">Insert → Overlays → Performance rendering · rendering only</span></div>
+      <p>Performance Render Mode strips GPU work during playback so long optimizations and fast-forward sections run at a higher frame rate. It is a presentation switch: the simulation does not know whether it is on.</p>
+      <div class="note ok"><b>Simulation-safe by design.</b> Colliders, triggers, Rigidbodies, Joints, physics layer assignments, <code>Time.fixedDeltaTime</code>, <code>Physics.autoSimulation</code> and every gameplay <code>Update</code>/<code>FixedUpdate</code> are untouched. Particle systems keep simulating and their collision callbacks still run. Camera culling masks change only for dedicated cosmetic layers; no GameObject layer or collision-matrix entry is changed.</div>
+      <div class="scroll"><table>
+        <thead><tr><th style="width:38%">Control</th><th style="width:14%">Default</th><th>Effect</th></tr></thead>
+        <tbody>
+          <tr><td><b>Performance Render Mode (Max FPS)</b></td><td><b>off</b></td><td>Master switch. Turns on the sections below and also disables MSAA and anisotropic filtering while it is on.</td></tr>
+          <tr><td><b>Disable Dynamic Shadows &amp; Reflection Probes</b></td><td>on</td><td><code>QualitySettings.shadows = Disable</code> and reflection probes are switched off. Scanned once on activation or scene load, never on a timer. Lights, intensity, geometry and gameplay layers stay enabled.</td></tr>
+          <tr><td><b>Disable Post-Processing &amp; CRT Shaders</b></td><td>on</td><td>Disables post-process layers, volumes and full-screen camera shader components, including ULTRAKILL's post-process handler when found. Camera clear flags, geometry and gameplay layers stay as they are.</td></tr>
+          <tr><td><b>Suppress Cosmetic Particles</b></td><td>on</td><td>Culls dedicated particle layers from the main camera and skips blood/decal visual spawn methods at the source. Systems still simulate.</td></tr>
+          <tr><td><b>Disable Decals &amp; Bullet Holes</b></td><td>on</td><td>Culls dedicated decal/gore layers and skips bloodstain update/spawn methods with Harmony prefixes. No scene scan and no bulk <code>renderer.enabled</code> flips.</td></tr>
+          <tr><td><b>Disable Pixel Lights</b></td><td>on</td><td><code>QualitySettings.pixelLightCount = 0</code>, removing extra forward-lighting passes.</td></tr>
+          <tr><td><b>Fast Enemy Mesh Skinning (1-Bone)</b></td><td>on</td><td><code>QualitySettings.skinWeights = OneBone</code> for crowds of enemies. Animation state and gameplay logic do not change.</td></tr>
+          <tr><td><b>Zero Particle Raycast Budget</b></td><td>on</td><td><code>QualitySettings.particleRaycastBudget = 0</code> so cosmetic particles cannot fire physics raycasts.</td></tr>
+        </tbody>
+      </table></div>
+      <ul>
+        <li>Every cached shadow, probe, post-process, quality and camera value is restored exactly when its section or the master toggle is switched off.</li>
+        <li>The mode re-applies after a scene load, so a level transition does not quietly turn the full pipeline back on.</li>
+        <li>Performance Render Mode is suspended while a video is recording and restored when the recording ends.</li>
+        <li>Off: the full visual pipeline is used. Physics and game logic behave identically in either state.</li>
+      </ul>
+      <p class="small muted">Config keys: <code>Performance render mode</code>, <code>Performance render: shadows</code>, <code>Performance render: post-processing</code>, <code>Performance render: cosmetic particles</code>, <code>Performance render: decals</code>, <code>Performance render: pixel lights</code>, <code>Performance render: one-bone skinning</code> and <code>Performance render: particle raycasts</code>.</p>
+    </section>
+
     <section id="baking">
-      <div class="shead"><span class="num">11</span><h2>Baking (bake_start / bake_end)</h2><span class="sub">optional sync aid · not legitimate</span></div>
+      <div class="shead"><span class="num">11</span><h2>Baking (bake_start / bake_start_nme / bake_end)</h2><span class="sub">optional sync aid · not legitimate</span></div>
       <div class="bigwarn" role="alert">
         <div class="title">&#9888; Warning</div>
         <p>WARNING: BAKING IS NOT LEGITIMATE. Baked playback replays stored state from a previous run and does not prove the inputs produce the run. Runs using baked playback are not valid TAS runs and cannot be submitted. Baking exists only to remove desyncs while you author or verify a route with real inputs.</p>
@@ -1640,35 +1699,35 @@ rank A  restarts 0  challenge NO</pre>
       <p>Baking is an optional sync aid. A bake block records the world state at the end of every tick of a real-input run, so later runs can compare against it or pin the world to it. A script without bake markers is not affected.</p>
 
       <h3 id="bake-syntax">11.1 Syntax</h3>
-      <p><code>bake_start [name]</code> opens a block and <code>bake_end</code> closes it. Both are special rows in the frames section (see <a href="#special">Special frames</a>), take no ticks and are case-insensitive. The block covers every tick from the row after <code>bake_start</code> up to <code>bake_end</code>.</p>
+      <p><code>bake_start [name]</code> opens a block, <code>bake_start_nme [name]</code> opens the non-map-elements variant, and <code>bake_end</code> closes either one. All are special rows in the frames section (see <a href="#special">Special frames</a>), take no ticks and are case-insensitive. The block covers every tick from the row after its start marker up to <code>bake_end</code>.</p>
       <div class="rowtext">bake_start room1
 <span class="f2">----------|f-----|------|-|90.0|0.0|40|</span>
 <span class="f2">----------|f-----|j-----|-|-|-|1|</span>
 bake_end</div>
 
       <h3 id="bake-names">11.2 Names</h3>
-      <p>One optional token of letters, digits, <code>-</code>, <code>_</code> and <code>.</code> only; anything else, or a second token, is a parse error. Without a name the block is called <code>blockN</code> (N = 1-based order of <code>bake_start</code> in the script). Names are compared case-insensitively and must be unique, because the name is part of the sidecar file name.</p>
+      <p>One optional token of letters, digits, <code>-</code>, <code>_</code> and <code>.</code> only; anything else, or a second token, is a parse error. Without a name the block is called <code>blockN</code> (N = 1-based order of <code>bake_start</code> / <code>bake_start_nme</code> in the script). Names are compared case-insensitively and must be unique, because the name is part of the sidecar file name.</p>
 
       <h3 id="bake-errors">11.3 Nesting and parse errors</h3>
       <p>Blocks cannot nest. These are parse errors (the script does not load):</p>
       <ul>
-        <li><code>bake_start</code> inside an open block</li>
-        <li><code>bake_end</code> without a matching <code>bake_start</code></li>
-        <li><code>bake_start</code> never closed before the end of the script</li>
+        <li><code>bake_start</code> or <code>bake_start_nme</code> inside an open block</li>
+        <li><code>bake_end</code> without a matching start marker</li>
+        <li><code>bake_start</code> or <code>bake_start_nme</code> never closed before the end of the script</li>
         <li>two blocks with the same name</li>
-        <li><code>bake_start</code> with more than one name, or a name with other characters</li>
+        <li><code>bake_start</code> or <code>bake_start_nme</code> with more than one name, or a name with other characters</li>
         <li><code>bake_end</code> followed by anything on its line</li>
       </ul>
       <p>A block that covers no ticks is ignored with a warning.</p>
 
       <h3 id="bake-hash">11.4 The hash</h3>
-      <p>Each block has a SHA-256 (lower-case hex) of the canonical header (<code>version</code>, <code>host_frametime</code>, <code>seed</code>, <code>start_type</code>, <code>wait_for_control</code>, <code>load_command</code>, and <code>fist</code> / <code>difficulty</code> / <code>weapons</code> / <code>loadout</code> when set) plus every simulation row from the script start through the block's <code>bake_end</code>, in auto-bulked form. Markers and pacing rows (<code>bake_start</code>, <code>bake_end</code>, <code>ff</code>, <code>FFF</code>) are not part of it, so adding, renaming or moving them invalidates nothing. Any change to an input, angle, frametime, count or command before or inside the block changes the hash; the old bake is then ignored and the block is recorded again on the next run.</p>
+      <p>Each block has a SHA-256 (lower-case hex) of the canonical header (<code>version</code>, <code>host_frametime</code>, <code>seed</code>, <code>start_type</code>, <code>wait_for_control</code>, <code>load_command</code>, and <code>difficulty</code> / <code>weapons</code> / <code>loadout</code> when set) plus every simulation row from the script start through the block's <code>bake_end</code>, in auto-bulked form. The top-level <code>fist</code> header and every mid-script <code>fist</code> row are deliberately excluded, so adding or changing fist selection does not invalidate a bake; they still count in the norefresh checksum. Markers and pacing rows (<code>bake_start</code>, <code>bake_end</code>, <code>ff</code>, <code>FFF</code>) are not part of it either, so adding, renaming or moving them invalidates nothing. The <code>bake_start_nme</code> mode is included in the hash (normal <code>bake_start</code> hashes are unchanged), so switching a block to or from NME forces a re-record. Any change to an input, angle, frametime, count or command before or inside the block changes the hash; the old bake is then ignored and the block is recorded again on the next run. Existing sidecars made before this rule are accepted through a legacy fist hash when the script still has the matching top-level <code>fist</code> header.</p>
 
       <h3 id="bake-files">11.5 Sidecar files</h3>
       <p>One file per block, next to the script: <code>&lt;script&gt;-&lt;block&gt;.ukbake</code>. For example <code>route.uktas</code> with <code>bake_start room1</code> gives <code>route-room1.ukbake</code>. The file is GZip-compressed (magic <code>UKBK</code>, format version 1) and carries the block's hash and tick count; a file whose hash or tick count does not match the block is not used. An unsaved script cannot be baked.</p>
 
       <h3 id="bake-recording">11.6 Recording</h3>
-      <p>When a block's first tick runs and no valid <code>.ukbake</code> exists, the block is recorded from the real inputs: per tick the time, RNG state, player (position, velocity, angles, health, hard damage, stamina, movement state, weapon, charges), projectiles, enemies, doors and rooms. The file is written at the block's last tick. A run that leaves the block early (rewind, load, stop) drops the recording; a block entered mid-way with no bake is not recorded. Status: <code>[RECORDING BAKE]</code>.</p>
+      <p>When a block's first tick runs and no valid <code>.ukbake</code> exists, the block is recorded from the real inputs: per tick the time, RNG state, player (position, velocity, angles, health, hard damage, stamina, movement state, weapon, charges), projectiles, enemies, and for a normal block doors and rooms. A <code>bake_start_nme</code> block omits the last two: doors and streamed rooms stay live and are not written to the file. The file is written at the block's last tick. A run that leaves the block early (rewind, load, stop) drops the recording; a block entered mid-way with no bake is not recorded. Status: <code>[RECORDING BAKE]</code>.</p>
 
       <h3 id="bake-options">11.7 Options (Insert, General tab, Baking card)</h3>
       <div class="scroll">
@@ -1698,7 +1757,7 @@ bake_end</div>
       <p>You pick a <b>segment</b> of the script (a run of framebulks), an <b>objective</b> (for example "highest horizontal speed on the last tick" or "reach this box as early as possible") and optional <b>constraints</b> and <b>boxes</b>. Then <b>START OPTIMIZER</b> repeats this loop:</p>
       <ol class="steps">
         <li><b>Baseline.</b> The segment is played once, unchanged. One sample per tick (position, velocity, health) is recorded. Its score is the starting best.</li>
-        <li><b>Mutate from the start.</b> A copy of a route is changed: 5% of attempts restart from the baseline, 20% start from one of the 5 best routes found so far, the rest start from the current best. Then the chosen number of random framebulks (1–4) each get one random enabled change (yaw, pitch, tick count, a key).</li>
+        <li><b>Generate a candidate.</b> The search strategy decides how. <b>Sweep + Random</b> (default) walks one framebulk at a time and adds a random burst when a pass finds nothing. <b>Sweep Only</b> is deterministic coordinate descent: change one thing on one bulk, keep it if better, retry the same bulk, and halve the step when a pass stalls. <b>Random Only</b> mutates 1–4 random bulks from the current best, with the small restart/top-5 chances. <b>Adaptive ML</b> uses a UCB1 bandit to choose which mutation operator to spend attempts on and breeds an elite pool by crossover.</li>
         <li><b>Evaluate the physics.</b> The tool restores the savestate taken at the segment start, plays the candidate to the end tick and samples every tick. Dying ends the attempt early.</li>
         <li><b>Validate.</b> A candidate is thrown away (and counted as invalid) if V1 died, touched a Keep-Out box, missed a Waypoint box, or broke a constraint.</li>
         <li><b>Lock improvements.</b> A valid candidate that scores better than the current best (by more than 0.000000001) replaces it. Nothing worse is ever accepted.</li>
@@ -1748,14 +1807,16 @@ FFF
 
     <section id="optim-tab">
       <div class="shead"><span class="num">12.1</span><h2 data-kw="optimizer tab controls start tick end tick rollback execution target objective direction scope constraints mutation sliders start optimizer stop optimizer telemetry">Optimizer tab and controls</h2><span class="sub">Insert → Optimizer (the last tab)</span></div>
-      <p>The tab has five cards, top to bottom. Defaults below are what a fresh game session shows.</p>
+      <p>The tab has seven cards, top to bottom: Spatial boxes, Geometry awareness, Optimization window, Objective and constraints, Search strategy, Mutations, Control and telemetry. Defaults below are what a fresh game session shows.</p>
 
       <h3 id="optim-window" data-kw="start tick end tick current rollback savestate full fff replay execution visual headless">Optimization window</h3>
       <div class="scroll"><table>
         <thead><tr><th style="width:24%">Control</th><th style="width:24%">Default</th><th>What it does</th></tr></thead>
         <tbody>
           <tr><td><b>Start Tick</b> + <b>Current</b></td><td><code>0</code></td><td>First tick of the segment. <b>Current</b> copies the engine's current tick.</td></tr>
-          <tr><td><b>End Tick</b> + <b>Current</b></td><td><code>0</code></td><td>Last tick of the segment, exclusive. Must be greater than Start Tick. Both fields are overwritten by <a href="#optim-markers">markers</a> when the script has them.</td></tr>
+          <tr><td><b>Mutate Until Tick</b> + <b>Current</b></td><td><code>0</code> = Evaluate At Tick</td><td>Last tick candidates may differ, exclusive. Mutations are confined to Start Tick..this tick; the untouched baseline tail is spliced back so every later tick still plays as written. A value at or below Start Tick, or past Evaluate At Tick, falls back to Evaluate At Tick.</td></tr>
+          <tr><td><b>Evaluate At Tick</b> (End Tick) + <b>Current</b></td><td><code>0</code></td><td>Last tick of the segment and the scoring endpoint, exclusive. Must be greater than Start Tick. Start Tick and Evaluate At are overwritten by <a href="#optim-markers">markers</a> when the script has them; Mutate Until Tick is not.</td></tr>
+          <tr><td><b>Sync Eval to Mutate End</b></td><td>button</td><td>Sets Evaluate At Tick = Mutate Until Tick for the common 1:1 optimization.</td></tr>
           <tr><td><b>Rollback</b>: Savestate at Start</td><td>selected</td><td>A master savestate is taken at the start tick and restored before every attempt. Fast, and the way every run works in this build.</td></tr>
           <tr><td><b>Rollback</b>: Full FFF Replay</td><td>—</td><td>Meant to replay from tick 0 in headless FFF before every attempt (slow, no savestates) for segments you do not trust a savestate restore with. <b>Not wired up yet:</b> the setting is stored, but the runner still restores the master savestate. Use Savestate at Start.</td></tr>
           <tr><td><b>Execution</b>: Visual FF</td><td>selected</td><td>Every attempt is rendered, so you can watch it and the path overlay stays live.</td></tr>
@@ -1775,11 +1836,16 @@ FFF
           <tr><td><b>Speed XZ</b></td><td><code>speed_xz</code>: horizontal speed, <code>sqrt(vx² + vz²)</code>.</td></tr>
           <tr><td><b>Speed 3D</b></td><td><code>speed_3d</code>: length of the whole velocity vector.</td></tr>
           <tr><td><b>Distance to Point</b></td><td>Smallest distance from V1 to an enabled Goal box on any tick (0 when inside). It is <b>always minimized</b>, whatever Direction says. With no Goal box it scores 0.</td></tr>
+          <tr><td><b>SSJ Boost</b></td><td>Sum of the quality of every Super Slide Jump in the segment: first-frame SSJ = 1.0, second = 0.5, third = 0.25. Scope is ignored; all ticks are counted. See <a href="#optim-ssj">SSJ detection</a>.</td></tr>
+          <tr><td><b>Player Health (hp)</b></td><td><code>NewMovement.hp</code>. Direction and Evaluation scope apply like the other numeric targets; use <b>Maximize</b> to preserve health.</td></tr>
+          <tr><td><b>Hard Damage</b></td><td><code>NewMovement.antiHp</code>: unhealable damage stacked on top of health. Lower is better, so use <b>Minimize</b>.</td></tr>
+          <tr><td><b>Net Health Gained (hp_delta)</b></td><td>Health on the evaluated tick minus health on the first sampled tick. With <b>Peak Across All Frames</b>, the largest gain at any tick counts. Use <b>Maximize</b>.</td></tr>
         </tbody>
       </table></div>
       <div class="grid g2">
         <div class="card"><h4>Direction</h4><p><b>Maximize</b> (default): bigger is better. <b>Minimize</b>: smaller is better. Use it for <code>pos.z</code>, <code>vel.y</code> and the like. To see how to pick the right one for X or Z, read <a href="#hud-facing">the Facing readout</a>.</p></div>
         <div class="card"><h4>Evaluation scope</h4><p><b>Last Frame Only</b> (default) judges the final tick of the segment. <b>Peak Across All Frames</b> judges the highest value reached on any tick, for example apex height. With Minimize, "peak" means the highest value is pushed down.</p></div>
+        <div class="card"><h4>Speed priority</h4><p><b>Balanced</b> scores the full 3D velocity. <b>Horizontal</b> weights XZ speed and protects horizontal acceleration zones. <b>Vertical</b> weights Y speed, protects slam/jump acceleration, and lets geometry guidance add vertical actions. It applies to <b>Speed 3D</b>, Reach Goal entry ties, adaptive credit and geometry-guided actions; <b>Speed XZ</b> and numeric constraints keep their raw values.</p></div>
       </div>
       <p class="small muted">The Baseline and Best numbers in the telemetry are scores where bigger is always better. With Minimize they show the raw value with its sign flipped, so a drop in <code>pos.z</code> reads as a rise in score.</p>
 
@@ -1799,38 +1865,79 @@ FFF
       <pre>pos.y &lt; 380 (Last Frame)      <span class="cmt">// end below a ceiling</span>
 speed_xz &gt; 50 (All Frames)    <span class="cmt">// never slow down mid-segment</span></pre>
 
+      <h3 id="optim-strategy" data-kw="search strategy sweep random hybrid adaptive ml ucb1 bandit elite crossover trim redundant inputs">Search strategy and Adaptive ML</h3>
+      <p>The <b>Search strategy</b> card picks how the next candidate is made. The default is <b>Sweep + Random</b>.</p>
+      <div class="scroll"><table>
+        <thead><tr><th style="width:26%">Mode</th><th>How it spends attempts</th></tr></thead>
+        <tbody>
+          <tr><td><b>Sweep + Random</b> (default)</td><td>Coordinate sweep first; when a full pass finds nothing, a burst of random candidates is tried before the next pass. Good balance for a route whose rough shape is already right.</td></tr>
+          <tr><td><b>Sweep Only</b></td><td>Deterministic coordinate descent: one framebulk at a time, a fixed list of small edits (toggle an input, nudge the angles, borrow a tick, flip one autofunc, fit SSJ/Jump-Slide, isolate one tick). Every improvement is kept and the same bulk is retried from the new point. Step sizes halve after a pass with no gain. Repeatable and the best way to polish a route.</td></tr>
+          <tr><td><b>Random Only</b></td><td>The previous behavior: mutate 1–4 random framebulks, with a 5% restart-from-baseline chance and a 20% top-5 route chance. Samples the whole segment; useful when the route shape is unknown.</td></tr>
+          <tr><td><b>Adaptive ML</b></td><td>A UCB1 multi-armed bandit learns which of the 15 mutation operators pay off. An elite pool keeps up to 12 diverse routes with their trajectories; about 40% of generations splice two elite parents (early ticks of one, exit ticks of the other) and smooth the join. Elite consensus locks agreed inputs, differential projection follows the pool's trend, mined input rhythms are spliced into flat spans, and stagnation detection thaws the locks and pivots to a divergent route.</td></tr>
+        </tbody>
+      </table></div>
+      <ul>
+        <li><b>Trim Redundant Inputs</b> (default on): accepts a same-score candidate when it presses fewer keys, the bxt-rs "minimize" step. It also lets a sweep simplify a route without losing score.</li>
+        <li><b>Adaptive route retry</b> (1–30 generations, default 4): how many non-improving generations Adaptive ML spends before reloading the current best and mutating from there.</li>
+        <li>Adaptive ML is experimental, not a guarantee of a global optimum. Its extra telemetry is there to show what it is trying.</li>
+      </ul>
+
+      <h3 id="optim-geometry" data-kw="geometry awareness wall bonk whisker clearance corner doorway smart steering">Obstacle and corner awareness</h3>
+      <p>The <b>Geometry awareness</b> card (on by default) helps after a wall bonk: a sampled tick where horizontal speed drops by more than 60% while movement is held. The optimizer casts read-only probes around the impact and steers the next candidates toward clearance instead of rolling blind yaw.</p>
+      <ul>
+        <li><b>Enable Obstacle &amp; Corner Awareness (Smart Steering)</b>: probes 24 horizontal directions up to 20 units at chest height, plus floor/ceiling probes up to 12 units. It picks the nearest open direction and a corner/doorway threshold.</li>
+        <li><b>Geometry Guidance Bias</b> (0.1–1, default 0.7): how often a post-bonk candidate uses clearance guidance instead of an ordinary roll.</li>
+        <li><b>Show Geometry Probe Whiskers</b> (off by default): draws the last fan — red for wall hits, bright green for the chosen clearance, yellow for the corner/doorway threshold.</li>
+        <li>Probes only read static Environment/Default colliders, excluding the player, viewmodels and triggers. They never write a transform, collider or input, so a run behaves identically with guidance on or off. With <b>Speed priority: Vertical</b>, guidance may add vertical actions as well.</li>
+      </ul>
+
       <h3 id="optim-mutations" data-kw="mutations yaw pitch framecount repeats movement dash slide jump combat weapon switches sliders">Mutations</h3>
       <p>These decide what a candidate may change. Each attempt picks one enabled change at random per mutated framebulk.</p>
       <div class="scroll"><table>
         <thead><tr><th style="width:36%">Control</th><th style="width:16%">Default</th><th>Range and effect</th></tr></thead>
         <tbody>
-          <tr><td><b>Mutate Yaw</b> + slider</td><td>on, 2.0°</td><td>Max yaw change per attempt, <b>0.1°–25.0°</b>. A random amount in ±step (never smaller than 0.01°). Skipped on framebulks whose yaw is <code>-</code>.</td></tr>
-          <tr><td><b>Mutate Pitch</b> + slider</td><td>on, 2.0°</td><td>The same for pitch, <b>0.1°–25.0°</b>. Skipped when pitch is <code>-</code>.</td></tr>
+          <tr><td><b>Mutate Yaw</b> + slider</td><td>on, 2.0°</td><td>Max yaw change per attempt, <b>0.1°–25.0°</b>. A random amount in ±step (never smaller than 0.01°). A <code>-</code> yaw is allowed and becomes an absolute angle anchored to the nearest earlier absolute yaw, or to the camera yaw at the start tick when there is no earlier one.</td></tr>
+          <tr><td><b>Mutate Pitch</b> + slider</td><td>on, 2.0°</td><td>The same for pitch, <b>0.1°–25.0°</b>. A <code>-</code> pitch is allowed and becomes an absolute angle anchored the same way.</td></tr>
           <tr><td><b>Mutate Framecount / Repeats</b> + slider</td><td>on, 1</td><td>Changes the tick count of a framebulk by a random amount of <b>±1 to ±15</b> (never below 1 tick).</td></tr>
           <tr><td>&nbsp;&nbsp;Keep total segment ticks</td><td>on</td><td>Takes the ticks from, or gives them to, another framebulk so the segment length stays fixed. If no other framebulk can absorb it, the change is undone.</td></tr>
           <tr><td><b>Mutate Movement Keys (WASD / flrb)</b></td><td>on</td><td>Toggles one of <code>f</code> <code>b</code> <code>l</code> <code>r</code> (field 2).</td></tr>
-          <tr><td><b>Mutate Dash &amp; Slide (d, s)</b></td><td>on</td><td>Toggles <code>d</code> or <code>s</code> (field 2).</td></tr>
-          <tr><td><b>Mutate Jump (j)</b></td><td>on</td><td>Toggles <code>j</code> (field 3).</td></tr>
+          <tr><td><b>Mutate Dash (d)</b></td><td>on</td><td>Toggles <code>d</code> (field 2).</td></tr>
+          <tr><td><b>Mutate Slide (s)</b></td><td>on</td><td>Toggles <code>s</code> (field 2). Removing a slide is always tried; adding one only where the game can start it: on the ground, as an intentional slam drop while a slam is ready, or in the air within three ticks of a jump from the ground. That last window is the only time the game accepts an air slide.</td></tr>
+          <tr><td><b>Mutate Jump (j)</b></td><td>on</td><td>Toggles <code>j</code> (field 3). Jumping is only added on a sampled frame where V1 is <b>on the ground</b> and the 0.2 s jump cooldown is clear, so every jump press goes through.</td></tr>
+          <tr><td><b>Mutate Slide-Stop Jump (SSJ)</b></td><td>on</td><td>Splits a framebulk of <b>3 or more ticks</b> into three rows: one tick sliding, one tick with slide released, then jump. The tick counts are preserved. The slide row must start grounded and the jump row must land on a sampled grounded frame with the jump cooldown clear. Bulks with console commands are skipped. This is the input pattern for an SSJ; see <a href="#optim-ssj">SSJ detection</a>.</td></tr>
+          <tr><td><b>Force SSJ (fill the route)</b></td><td><b>off</b></td><td>Spends every attempt on the slide / release / jump pattern before any other change, and only on framebulks the sampled frames can turn into an SSJ. The sweep tries it first on each one, and random mode picks an eligible bulk instead of an ordinary mutation, so a run keeps converting the route until no bulk can host one. Works with <b>Mutate Slide-Stop Jump</b> off. Score still decides: a candidate that does not improve is rejected. The <code>m</code> autofunc does the same pattern during playback.</td></tr>
+            <tr><td><b>Mutate Jump-Slide (Dive)</b></td><td>on</td><td>Splits a framebulk of <b>2 or more ticks</b> into one grounded jump tick, one slide tick right after it, then the rest of the bulk. This is the Dive: sliding in the air can only be initiated by a jump from the ground followed immediately by a slide, so this is the only structural way to create an air slide. The jump tick must be grounded and off cooldown. Bulks with console commands are skipped.</td></tr>
+          <tr><td><b>Mutate Autofuncs (j s/S g c w m)</b></td><td>on</td><td>Toggles one of the autojump, autoslide, ground slam, SSJ macro, coin assist or whiplash assist flags in field 1. <code>j</code>, <code>s</code>, <code>S</code>, <code>g</code> and <code>m</code> are only added on framebulks whose sampled ticks can use them.</td></tr>
+          <tr><td><b>Mutate AutoDash (d)</b></td><td>on</td><td>Toggles the autodash flag <code>d</code> on its own, separately from the group above: it is the only autofunc that spends stamina, so it can be switched off without touching the rest. Adding it needs a sampled tick with a full dash bar and no dash already running.</td></tr>
+          <tr><td><b>Independent autofunc switches</b></td><td>on; Coin Throw and Deadcoin off</td><td>Each autofunc has its own toggle: AutoJump (j), AutoSlide (s/S), AutoDash (d), AutoGroundSlam (g), SSJ Macro (m/mN), Coin Aim (c), Whip Assist (w), Coin Throw (t) and Deadcoin (e). The grouped row above toggles one of j/s/S/g/c/w/m; the individual switches let you keep one helper out of the search.</td></tr>
+          <tr><td><b>Mutate Single Ticks</b></td><td><b>off</b></td><td>Splits a framebulk of 2 or more ticks and changes one isolated tick. Bulks with console commands are skipped.</td></tr>
           <tr><td><b>Mutate Combat (1, 2, p, v)</b></td><td><b>off</b></td><td>Toggles fire, alt fire, punch or whiplash (field 3). Off so it cannot start shooting on its own.</td></tr>
           <tr><td><b>Mutate Weapon Switches</b></td><td><b>off</b></td><td>Toggles one of the weapon slots <code>w1</code>–<code>w6</code>.</td></tr>
           <tr><td><b>Lock Shots to Airborne Projectiles/Coins</b></td><td>on</td><td>The <a href="#optim-aimlock">aim lock</a>.</td></tr>
           <tr><td>Framebulks mutated per attempt</td><td>1</td><td>Slider <b>1–4</b>. Higher values jump further but find fewer small improvements.</td></tr>
         </tbody>
       </table></div>
-      <p class="small muted">Key mutations flip the key on or off, so a key already held by the framebulk is released. Only framebulk lines are mutated; special frames, <code>look_at</code> lines and comments inside the segment stay as they are.</p>
+      <p class="small muted">Key mutations flip the key on or off, so a key already held by the framebulk is released. Actions the game would ignore are never <em>added</em>: a jump needs a grounded frame with no jump cooldown, a dash needs a full stamina bar, and a slide needs the ground, a running slam, a slam-ready drop, or a jump within the last three ticks. Only framebulk lines are mutated; special frames, <code>look_at</code> lines and comments inside the segment stay as they are. In Sweep and Sweep + Random the "Framebulks mutated per attempt" slider is ignored because the sweep focuses one bulk at a time; Random and Adaptive ML use it.</p>
 
-      <p>The <b>Spatial boxes (freecam)</b> card sits between Mutations and Control. It is covered in <a href="#optim-boxes">12.2</a>.</p>
+      <h3 id="optim-ssj" data-kw="ssj super slide jump stop slide wait one frame jump boost framesSinceSlide 24.75 12.375 6.1875">SSJ detection</h3>
+      <p>An <b>SSJ</b> is a jump made while recovering from a ground slide. In the game code, <code>StopSlide()</code> sets <code>framesSinceSlide = 0</code>, and <code>FixedUpdate()</code> increments it while V1 is not sliding. <code>Jump()</code> calls <code>TrySSJ()</code>, which accepts <code>0 &lt; framesSinceSlide &lt; ssjMaxFrames</code> (the shipped <code>ssjMaxFrames</code> is 4, so frames <b>1, 2 and 3</b>). The quality is <code>1 / 2^(frame-1)</code>: the first possible frame gives the full boost, then half, then a quarter. The wiki’s values are <b>+24.75, +12.375 and +6.1875 u/s</b>.</p>
+      <p><b>Jumping out of a held slide is not an SSJ.</b> <code>Jump()</code> calls <code>StopSlide()</code> before <code>TrySSJ()</code>, so that jump sees <code>framesSinceSlide = 0</code>. You must release slide, let one or more ticks pass, then jump. The optimizer looks for exactly that: a new <code>jumping</code> edge while the previous sample was grounded, with <code>framesSinceSlide</code> 1–3 and sliding false. Requiring the previous sample to be grounded keeps ordinary wall jumps out, since those start from the wall instead of the ground. The <b>SSJ Boost</b> target rewards the detections; normal <b>Speed XZ</b> and <b>Reach Goal Box</b> runs also benefit because the game applies the boost to horizontal velocity. The <code>m</code>/<code>m0</code> macro emits the perfect 3-tick input pattern; <code>m1</code> and <code>m2</code> deliberately add blank ticks for the weaker recovery frames.</p>
+
+      <p>The <b>Spatial boxes (freecam)</b> card is the first card in the tab, and <b>Geometry awareness</b> follows it. Boxes are covered in <a href="#optim-boxes">12.2</a>.</p>
 
       <h3 id="optim-control" data-kw="start optimizer stop optimizer telemetry it/s invalid attempts baseline best delta">Control and telemetry</h3>
       <ul>
         <li><b>START OPTIMIZER</b> begins the search (it turns into <b>STOP OPTIMIZER</b> while running). Stop keeps the best route found so far.</li>
+        <li><b>Clear Paths</b> removes the white baseline, cyan current-best and dark-teal candidate lines from the 3D view. The boxes and the best segment stay; new attempts can draw a candidate again.</li>
         <li>Two lines update live:
           <pre>Speed: 12.3 it/s (40% invalid) | Attempts: 500
 Baseline: 812.4 -> Best: 861.9 (Delta: +49.5)</pre>
           <b>it/s</b> is attempts per second, <b>% invalid</b> is the share thrown away by death, boxes or constraints, <b>Attempts</b> is the total tried, <b>Baseline</b> is the unchanged segment's score, <b>Best</b> the current best, and <b>Delta</b> their difference.</li>
         <li>Below them, up to 10 log lines: <code>Baseline score: ...</code>, <code>Found new best value: ... (delta: ...)</code>, and warnings such as <code>Baseline is invalid (...); searching from it anyway.</code> An invalid baseline still gives a start so the search can climb back to a valid route.</li>
+        <li>In <b>Adaptive ML</b>, extra lines show generation and population, top operators, elite consensus and differential trend, and stagnation progress. These are diagnostics, not a promise that the search has found the global best.</li>
         <li>When a best exists, <b>Apply Best to Current Script</b>, <b>Save Best to File</b> and <b>Save as New Branch</b> appear. See <a href="#optim-save">Saving the result</a>.</li>
       </ul>
+      <p class="small muted">While an optimizer run is active, the tool holds Unity's <code>Application.runInBackground</code> on, so the game keeps stepping when its window is not focused. The player's own setting is restored the moment the run ends.</p>
     </section>
 
     <section id="optim-boxes">
@@ -1911,7 +2018,7 @@ Baseline: 812.4 -> Best: 861.9 (Delta: +49.5)</pre>
       <div class="shead"><span class="num">12.4</span><h2 data-kw="trajectory three paths baseline best candidate apply best save best branch uktasproj bridged optimization-best">Trajectories and saving branches</h2><span class="sub">3-path overlay · apply · save · branch</span></div>
 
       <h3 id="optim-trajectory">The three paths</h3>
-      <p>While you have an optimizer in the tab, three lines are drawn in the 3D view (the points are V1's position on each tick of the segment):</p>
+      <p>Three lines are drawn in the 3D view (the points are V1's position on each tick of the segment). They are pushed from the frame loop, so they keep rendering in freecam and while the TAS window is hidden:</p>
       <figure class="diagram">
         <svg viewBox="0 0 760 230" role="img" aria-label="Three paths from the same start: a white original baseline, a bright cyan current best that is longer and higher, and a dark teal live candidate in between">
           <rect class="s-bg" x="5" y="5" width="750" height="220" rx="10"/>
@@ -1935,7 +2042,7 @@ Baseline: 812.4 -> Best: 861.9 (Delta: +49.5)</pre>
           <tr><td><b>Live candidate</b></td><td><span class="tag" style="border-color:#007373">Dark teal · RGBA 0, 0.45, 0.45, 0.9</span></td><td>The most recent attempt, valid or not. Use it to see what the search is trying.</td></tr>
         </tbody>
       </table></div>
-      <p class="small muted">They are drawn whatever the normal trajectory visibility setting says. Before the first attempt finishes, only the boxes show.</p>
+      <p class="small muted">They are drawn whatever the normal trajectory visibility setting says. Before the first attempt finishes, only the boxes show. <b>Clear Paths</b> in the Control card clears all three lines without stopping the search or changing the best segment.</p>
 
       <h3 id="optim-save" data-kw="apply best to current script save best to file save as new branch uktasproj bridged optimization-best.uktas splice">Saving the result</h3>
       <div class="grid g2">
@@ -1954,6 +2061,7 @@ Baseline: 812.4 -> Best: 861.9 (Delta: +49.5)</pre>
     <section id="video-recording">
       <div class="shead"><span class="num">13</span><h2 data-kw="video recording ffmpeg record_video record_fps blend_samples shutter_angle record_volume bxt_rec record_start record_stop libx264 loudnorm">Video recording and FFmpeg commands</h2><span class="sub">Recording tab · header keys · script commands</span></div>
       <p>The recorder renders the run offline: playback stays frame-locked (one tick per rendered frame), every frame is piped to FFmpeg, and game audio is captured on request. Motion blur comes from camera poses interpolated between ticks. <code>ffmpeg.exe</code> is not shipped; the tool looks for it in the configured <b>ffmpeg path</b>, then the game folder, then every <code>PATH</code> entry. Missing: <code>ffmpeg not found. Set its path in the Recording tab.</code></p>
+      <div class="note warn"><b>Baked inputs in a render.</b> The Recording tab has <b>Record TAS playback with baked inputs (NOT LEGIT)</b>. Turning it on enables baked playback for that render and starts the run if needed; the video is marked NOT LEGITIMATE and is not submittable. <b>Performance Render Mode</b> is suspended while any video is recording and restored when the recording ends.</div>
 
       <h3 id="video-header">Header keys</h3>
       <div class="scroll"><table>

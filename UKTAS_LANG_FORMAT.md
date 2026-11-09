@@ -33,7 +33,7 @@ frames
 | `difficulty <name>` | `harmless`, `lenient`, `standard`, `violent` or `brutal`, or the game's number 0-4 (`GameDifficulty`: Harmless 0 .. Brutal 4). Set at Play, before the start scene loads and before the start state is captured, through the game's own `PrefsManager.SetInt("difficulty", n)` (what the difficulty menu does, so it stays set afterwards). Objects read it when they spawn: with `start_type none` or `load_state` the current scene keeps what it already spawned, and a warning is shown. Omitted: the game's current difficulty is kept. An unknown value gives a parse warning and keeps the current difficulty. Part of the norefresh checksum only when set. |
 | `wait_for_control <bool>` | Default true. Hold tick 1 until `NewMovement.activated` is true, then wait the configured settle frames. Ignored when there is no player (title screen, boot). |
 | `load_command <cmds>` | Semicolon-separated commands run once before frame 1. |
-| `fist <arm>` | `knuckleblaster` or `parry` (parry is the Feedbacker). Equips that fist before tick 0 (after the wait for control) through the game's `FistControl.ForceArm`, so the run does not depend on the fist the player had out. Omitted: the current fist is kept. The arm must be owned and enabled in the arm settings; otherwise a warning is shown and the current fist is kept. The equipped arm is captured in savestates, so rewinds keep it. Part of the norefresh checksum. |
+| `fist <arm>` | `knuckleblaster` or `parry` (parry is the Feedbacker). Equips that fist before tick 0 (after the wait for control) through the game's `FistControl.ForceArm`, so the run does not depend on the fist the player had out. Omitted: the current fist is kept. The arm must be owned and enabled in the arm settings; otherwise a warning is shown and the current fist is kept. The equipped arm is captured in savestates, so rewinds keep it. Part of the norefresh checksum, but not of a bake block's hash: adding or changing `fist` does not force a re-bake. Use a `fist` special frame to change the arm mid-script. |
 | `demo <file>`, `save <name>`, `author <text>`, `description <text>` | Optional metadata. |
 
 `start_type main_menu` loads the title screen so the script can click through menus. `start_type none` starts wherever the game currently is.
@@ -50,11 +50,15 @@ autofuncs|movement|actions|frametime|yaw|pitch|frames|commands
 
 Commands may contain `;` but never `|`.
 
-### Field 1: autofuncs (10 chars, default `----------`)
+### Field 1: autofuncs (10 slots, default `----------`)
 
-`a` auto-align, `j` autojump, `s` autoslide, `d` autodash, `c` coin aim assist, `g` ground slam, `w` whiplash assist, `t` coin throw, `e` deadcoin. Remaining slots are reserved. `-` is off.
+`a` auto-align, `j` autojump, `s` autoslide, `S` spam autoslide, `d` autodash, `c` coin aim assist, `g` ground slam, `w` whiplash assist, `t` coin throw, `e` deadcoin, `m` SSJ macro. `S` is the only case-sensitive autofunc: lowercase `s` holds Slide, uppercase `S` spam-presses it. Remaining slots are reserved. `-` is off. An SSJ variant is written as a digit directly after `m` (`---------m1`), which makes that one field 11 characters long.
+
+`s` holds Slide on every grounded tick. `S` uses the same grounded/jump/SSJ gate but presses Slide only on alternate eligible ticks (one frame on, one frame off); the first eligible tick is on, and losing the gate resets the phase so the next landing starts with a press. A Slide held by the framebulk itself cannot be released by either form.
 
 `t` (slot 8) runs once, on the first tick of its framebulk: it simulates the game's coin toss and aims where the coin stays closest to V1 for the longest **while the coin is still in the air**. Ticks where the coin would touch the level do not count, because the game destroys the coin on contact; each airborne tick scores `1/(1 + distance^2)`. Alt fire (`2`) still throws the coin. The `clearcoinpaths` command (field 8) wipes the coin path visualizer.
+
+`m` (slot 10) plays the Super Slide Jump pattern. On the landing tick it holds Slide for **one** tick, releases it on the next tick (no Slide and no Jump), then presses Jump on the following tick. That is the 3-tick `m`/`m0` pattern and gives the full SSJ boost. `m1` waits one extra blank tick (4 ticks, half boost), `m2` waits two extra blank ticks (5 ticks, quarter boost), and `mN` waits N extra blank ticks. Jumping while Slide is still held would see frame 0 and be a plain jump, so the release tick is required. It starts the slide again on the landing tick, so the pattern repeats. It works with both `s` and `S`. A Slide the framebulk holds itself cannot be released by an autofunc.
 
 `e` (slot 9) deadcoins by detecting, not by holding an aim: every tick it looks for an unshot coin in the air and makes no other checks (no gun cooldown test, no line-of-sight test). If one exists it runs a **three-tick** sequence, because ULTRAKILL shoots along the camera it read on that frame: tick 1 turns the view to the coin, tick 2 presses primary fire while still looking at it, tick 3 touches nothing so your own angle is back. The turn only ever reaches the injected tick, never the script's held angle. It never presses alt fire — toss the follow-up coin yourself while the shot's chain is resolving (0.1 s after the hit), and the new coin takes over its power without being ricoshoted. One shot per framebulk that holds `e`; a rewind arms it again.
 
@@ -100,7 +104,7 @@ Menu tokens (uppercase): `U` `D` `L` `R` `C` `B` `E` are menu up, down, left, ri
 
 Examples: `------` nothing; `j-----` jump; `-12---` fire and alt-fire; `-----w2` switch to the shotgun; `------N` one wheel notch forward (hold for one tick only); `j12p--x` jump, both fires, punch and change fist; `-1----G1` fire, then re-equip the equipped shotgun variation after the shot; `------G2` same-tick shotgun swap; `------v2` press the green variation bind.
 
-`p` follows the equipped arm. With the Knuckleblaster out it throws the explosive punch; with the Feedbacker out it throws the parry punch. The header `fist knuckleblaster` / `fist feedbacker` sets the arm on tick zero, and the arm state is part of the savestate.
+`p` follows the equipped arm. With the Knuckleblaster out it throws the explosive punch; with the Feedbacker out it throws the parry punch. The header `fist knuckleblaster` / `fist feedbacker` sets the arm on tick zero, and the arm state is part of the savestate. A `fist` special frame changes it mid-script by injecting `x` only when the other arm is out.
 
 Most tokens are injected as the exact key or mouse button the game has the action bound to (read from the game's own input asset), so rebinds work. Punch and the variation binds are written straight into the game's `InputSource` action state, so `p` always reaches the equipped arm and `v1` / `v2` / `v3` always re-equip the equipped variation without also firing a directly-bound arm action.
 
@@ -143,14 +147,18 @@ Lines without pipes inside the frames section. They are not merged by auto-bulki
 | `change yaw to <deg> over <t> s` | Smooth yaw change running alongside the following framebulks. |
 | `change pitch to <deg> over <t> s` | Same for pitch. |
 | `target_yaw <deg>` | Absolute view target. |
+| `fist <arm>` | Takes no ticks. Requests `parry` or `knuckleblaster` on the first tick of the next framebulk. It reads the live arm and injects the normal `x` change-fist action only when the other arm is equipped; if the requested arm is already out, it injects nothing. `fist none` / `fist current` are header-only. |
 | `ff` | Fast-forward: takes no ticks. Every tick above the line plays uncapped at maximum framerate (like the menu FF toggle); from the line onward the menu playback speed applies. Only the first `ff` counts; pacing only, not part of the norefresh checksum. |
 | `look_at entity <id> [hitbox] [ox oy oz]` | Takes no ticks. Until `look_at off`, every `-` angle column aims the camera at the entity's center or named hitbox plus the world-space offset (default `0 0 0`). Without a hitbox it aims at the center of the target's active collider bounds, not the transform pivot (which is at the feet for most enemies). |
 | `look_at <type\|category> [hitbox] [ox oy oz]` | Takes no ticks. Same, but aims at the nearest live entity of that type (or category: `enemy`, `projectile`, `object`) instead of an ID, for example `look_at coin 0 1 0`, `look_at v2 head 0 0 0` or `look_at v2 0 0 0`. Enemy names come from `EnemyIdentifier.enemyType` (`v2`, `filth`, `swordsmachine`, ...), and a prefix also matches variants (`v2` finds `V2Second`). The nearest is picked on the first tick the line is in effect and held while it stays alive and active; if it is destroyed or deactivated (a punched coin, a pooled object), the next tick picks the nearest live match again. Rewinding to before the pick, loading a state, or resuming from a `norefresh` checkpoint also forgets the pick and re-picks from the restored state. |
 | `look_at off` | Stops aiming; `-` columns keep the last aimed angle. |
 | `bake_start [name]` | Takes no ticks. Opens a bake block (section 9). **Baked playback is not legitimate.** |
+| `bake_start_nme [name]` | Same as `bake_start`, but doors and streamed map rooms are left out of the bake and stay live. **Baked playback is not legitimate.** |
 | `bake_end` | Takes no ticks. Closes the open bake block (section 9). |
 
 `change yaw|pitch` takes no ticks of its own. It starts on the first tick of the next framebulk and moves the angle in a straight line to the target over `<t>` seconds of script time, landing exactly on the target on the last tick, carrying across as many bulks as the time covers. It only drives a `-` angle column: a bulk that sets that angle itself (absolute, relative, or a `target_yaw` line for yaw) snaps to its value and ends the change on that axis. Yaw and pitch changes are independent.
+
+`fist parry` / `fist knuckleblaster` also starts on the first tick of the next framebulk. It uses the game's normal `x` change-fist action, not `ForceArm`, so the switch has the usual game animation and sound. The action is added to that tick only (a following special frame releases it). If the live arm is already the requested one, no `x` is injected. `fist` lines are not part of the bake hash, so adding one to a baked script does not force a re-bake.
 
 ```
 change pitch to 0 over 0.4 s
@@ -238,7 +246,7 @@ frames
 - The guide says target_yaw "sets the yaw target for the next row"; the spec calls it an "absolute view target" and says a `target_yaw` line ends a `change yaw`. The exact timing is not clear.
 - `once:` combined with multiple commands: the spec does not say whether `once:` applies to one command or to all commands after it in the field.
 
-## 9. Baking (`bake_start` / `bake_end`)
+## 9. Baking (`bake_start` / `bake_start_nme` / `bake_end`)
 
 > ## ⚠ WARNING
 >
@@ -251,9 +259,10 @@ Baking is an optional sync aid. A bake block records the world state at the end 
 | Line | Meaning |
 |---|---|
 | `bake_start [name]` | Special frame on its own line, 0 ticks. Opens a block. |
+| `bake_start_nme [name]` | The same block, but map elements (doors and the rooms they stream) are not baked. Those objects stay live. |
 | `bake_end` | Standalone marker, 0 ticks, takes nothing else. Closes the block. |
 
-Both go in the frames section; keywords are case-insensitive. The block covers every tick from the line after `bake_start` up to `bake_end`.
+All go in the frames section; keywords are case-insensitive. The block covers every tick from the line after `bake_start` / `bake_start_nme` up to `bake_end`.
 
 ```
 bake_start room1
@@ -262,28 +271,30 @@ bake_start room1
 bake_end
 ```
 
+`bake_start_nme` means **non-map-elements**. It records the same player, RNG, enemy, projectile, charge and timing state as `bake_start`, but writes no door or streamed-room state. During playback it therefore leaves the map's doors and rooms to the live simulation instead of snapping them to the bake. Use it when map elements are not part of what you are syncing. Switching a block between the two commands changes its hash, so the old sidecar is not reused.
+
 ### Names
 
 - One optional token of letters, digits, `-`, `_` and `.` only. Anything else, or a second token, is a parse error.
-- Without a name the block is called `blockN` (N = 1-based order of `bake_start` in the script).
+- Without a name the block is called `blockN` (N = 1-based order of `bake_start` / `bake_start_nme` in the script).
 - Names are compared case-insensitively and must be unique, because the name is part of the sidecar file name.
 
 ### Nesting and parse errors
 
 Blocks cannot nest. These are parse errors (the script does not load):
 
-- `bake_start` inside an open block
-- `bake_end` without a matching `bake_start`
-- `bake_start` never closed before the end of the script
+- `bake_start` or `bake_start_nme` inside an open block
+- `bake_end` without a matching `bake_start` or `bake_start_nme`
+- `bake_start` or `bake_start_nme` never closed before the end of the script
 - two blocks with the same name
-- `bake_start` with more than one name, or a name with other characters
+- `bake_start` or `bake_start_nme` with more than one name, or a name with other characters
 - `bake_end` followed by anything on its line
 
 A block that covers no ticks is ignored with a warning.
 
 ### The hash
 
-Each block has a SHA-256 (lower-case hex) of the canonical header (`version`, `host_frametime`, `seed`, `start_type`, `wait_for_control`, `load_command`, and `fist` / `difficulty` / `weapons` / `loadout` when set) plus every simulation line from the script start through the block's `bake_end`, in auto-bulked form. Markers and pacing lines (`bake_start`, `bake_end`, `ff`, `FFF`) are not part of it, so adding, renaming or moving them invalidates nothing. Any change to an input, angle, frametime, count or command before or inside the block changes the hash; the old bake is then ignored and the block is recorded again on the next run.
+Each block has a SHA-256 (lower-case hex) of the canonical header (`version`, `host_frametime`, `seed`, `start_type`, `wait_for_control`, `load_command`, and `difficulty` / `weapons` / `loadout` when set) plus every simulation line from the script start through the block's `bake_end`, in auto-bulked form. The top-level `fist` header and every mid-script `fist` line are deliberately not part of the bake hash, so adding or changing fist selection does not invalidate a bake; they are still part of the norefresh checksum. Markers and pacing lines (`bake_start`, `bake_end`, `ff`, `FFF`) are not part of it either, so adding, renaming or moving them invalidates nothing. The `bake_start_nme` mode is part of the hash (normal `bake_start` hashes are unchanged), so switching a block to or from NME forces a re-record. Any change to an input, angle, frametime, count or command before or inside the block changes the hash; the old bake is then ignored and the block is recorded again on the next run. Existing sidecars made before fist left the bake hash are accepted through a legacy fist hash when the script still has the matching top-level `fist` header.
 
 ### Sidecar files
 
@@ -294,7 +305,7 @@ Each block has a SHA-256 (lower-case hex) of the canonical header (`version`, `h
 
 ### Recording
 
-When a block's first tick runs and no valid `.ukbake` exists, the block is recorded from the real inputs: per tick the time, RNG state (UnityEngine.Random and the System.Random seed stream; in the session that recorded the bake also the System.Random instance states, which are kept in memory only), player (position, velocity, angles, health, hard damage, stamina, movement state, weapon, charges), projectiles, enemies, doors and rooms. The file is written at the block's last tick. A run that leaves the block early (rewind, load, stop) drops the recording; a block entered mid-way with no bake is not recorded. Status: `[RECORDING BAKE]`.
+When a block's first tick runs and no valid `.ukbake` exists, the block is recorded from the real inputs: per tick the time, RNG state (UnityEngine.Random and the System.Random seed stream; in the session that recorded the bake also the System.Random instance states, which are kept in memory only), player (position, velocity, angles, health, hard damage, stamina, movement state, weapon, charges), projectiles, enemies, and for a normal block doors and rooms. A `bake_start_nme` block omits the last two: doors and streamed rooms stay live and are not written to the file. The file is written at the block's last tick. A run that leaves the block early (rewind, load, stop) drops the recording; a block entered mid-way with no bake is not recorded. Status: `[RECORDING BAKE]`.
 
 ### Options (Insert, General tab, Baking card)
 

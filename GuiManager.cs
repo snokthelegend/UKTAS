@@ -333,7 +333,7 @@ namespace UltrakillTAS
                               "   render " + _time.MeasuredFps.ToString("0") + " fps";
             _cachedMode = "mode " + _engine.Mode + "   finished " + _engine.Finished +
                           "   steps queued " + _time.PendingSteps +
-                          "   timeScale " + Time.timeScale.ToString("0.###") + " (game-owned, read only)";
+                          "   timeScale " + Time.timeScale.ToString("0.###") + " (game-owned; loads restore the saved value)";
             _cachedStatusDetail = "status " + (_time.Paused ? "PAUSED" : "RUNNING") +
                                   "   timer " + _engine.TimerText +
                                   "   enemies " + _cachedEnemyCount +
@@ -419,7 +419,6 @@ namespace UltrakillTAS
 
         public void OnGUI()
         {
-            PushOptimizerOverlay();
             // While NoRefresh races to its breakpoint nothing is drawn, so the viewmodel scan
             // and every world-space overlay are skipped: they would only cost frame time.
             bool noRefresh = _engine != null && _engine.RenderSuppressed;
@@ -916,7 +915,8 @@ namespace UltrakillTAS
 
             // Quantised to 0.00001 s so 0.008 and its neighbours stay reachable and
             // the handle cannot snap onto a 60 fps value.
-            float slider = Slide((float)_time.HostFrametime, 0.001f, 0.05f, "Drag to change the tick length (0.001 to 0.05 seconds).");
+            float slider = SlideFormat((float)_time.HostFrametime, 0.001f, 0.05f,
+                "Drag to change the tick length (0.001 to 0.05 seconds).", "0.0000");
             slider = Mathf.Round(slider * 100000f) / 100000f;
             if (Math.Abs(slider - (float)_time.HostFrametime) > 0.000001f)
             {
@@ -972,6 +972,29 @@ namespace UltrakillTAS
                 _engine.ClearNorefreshCache();
             GUILayout.Label("cached checkpoints: " + _states.NorefreshCount, _hintStyle);
             GUILayout.EndHorizontal();
+            // Debug dial for the cache boundary: the state is cached on the frame named by this
+            // offset, so a resume can be lined up with the script when the boundary itself is
+            // the thing that is off. The entry is keyed by the marker, not the frame, so a
+            // cached state would otherwise keep the old boundary.
+            int previousNorefreshOffset = _plugin.NorefreshTickOffset.Value;
+            IntSliderRow("Capture offset", _plugin.NorefreshTickOffset, -3, 3,
+                "Which tick a checkpoint is cached on. -1 (the default) caches one tick later than the marker and is the boundary that lines the resumed world up with continuous playback; 0 caches on the marker's own tick, +1 one tick earlier (resume starts further behind the script). Changing it clears the cache so the next Play re-captures.");
+            if (_plugin.NorefreshTickOffset.Value != previousNorefreshOffset)
+                _states.ClearNorefresh();
+            // Playback-only companion dial: the bulk the resume starts in can hold a few frames
+            // more or fewer without the script (or its saved counts) being touched.
+            IntSliderRow("Bulk frames", _plugin.NorefreshBulkFrames, -10, 10,
+                "Debug: ticks added to (negative: removed from) the framebulk the checkpoint resumes in, for the resumed run only. The script and its saved frame counts stay as written; the value is used by the next Play/resume, so a checkpoint already cached is fine.");
+            // Sync bake: the first ticks after a cache point are recorded while playing through
+            // and written back on a resume, so the player is re-synced before the run continues live.
+            _plugin.NorefreshBakeSync.Value = Tog(_plugin.NorefreshBakeSync.Value,
+                "Bake the first ticks after a checkpoint (sync on resume)",
+                "When a norefresh checkpoint is cached, record the first ticks after the resumed tick into a temporary .ukbake (the script is never changed). A resume writes those baked frames on every tick, so the player position and velocity re-sync to the continuous trajectory; the rest of the run then plays live. On a resume, the bake block the checkpoint lands in is also closed after the Sync bake ticks window, as if a bake_end stood there. The bake is stamped with the script's hash over the covered range, so editing those frames makes the resume ignore it. Applied baked state marks the run as not submittable.");
+            int previousSyncTicks = _plugin.NorefreshSyncTicks.Value;
+            IntSliderRow("Sync bake ticks", _plugin.NorefreshSyncTicks, 0, 120,
+                "How many ticks after the resume the temporary sync bake covers, and where a norefresh resume automatically runs bake_end for the bake block it lands in. The default 30 re-syncs over a short fixed window, then closes that block and plays the rest of the run live; 0 records to the next bake block or the end of the script and disables the automatic bake_end. The script and its .ukbake files are not changed. Changing it clears the cached checkpoints so the next Play records the new window.");
+            if (_plugin.NorefreshSyncTicks.Value != previousSyncTicks)
+                _states.ClearNorefresh();
             Separator();
             _plugin.NoRefreshFastForward.Value = Tog(_plugin.NoRefreshFastForward.Value,
                 "Enable FFF NoRefresh Fast-Forward (run FFF segments with no 3D rendering)",
@@ -1023,7 +1046,7 @@ namespace UltrakillTAS
             GUILayout.BeginHorizontal();
             bake.EnableBakedPlayback.Value = Tog(bake.EnableBakedPlayback.Value,
                 "Enable Baked Playback (.ukbake)",
-                "NOT LEGITIMATE. Inside a bake_start/bake_end block with a valid .ukbake, the inputs still run and the baked world state is written over the game after every tick. Can be switched at any time. A run that uses it cannot be submitted.",
+                "NOT LEGITIMATE. Inside a bake_start/bake_start_nme/bake_end block with a valid .ukbake, the inputs still run and the baked world state is written over the game after every tick. bake_start_nme leaves doors and streamed rooms live. Can be switched at any time. A run that uses it cannot be submitted.",
                 GUILayout.Width(250));
             GUILayout.Label(BakeManager.NotLegitWarning, _errorStyle, GUILayout.ExpandWidth(true));
             GUILayout.EndHorizontal();
@@ -1056,7 +1079,7 @@ namespace UltrakillTAS
                                 "). Start a fresh run from tick 0 with baked playback off.", _errorStyle);
             int blocks = script != null ? script.BakeBlocks.Count : 0;
             Hint(blocks == 0
-                ? "no bake_start / bake_end blocks in this script"
+                ? "no bake_start / bake_start_nme / bake_end blocks in this script"
                 : blocks + " bake block(s), " + bake.CachedBlockCount(script) + " with a valid bake in memory" +
                   (bake.DetailText.Length > 0 ? "   " + bake.DetailText : string.Empty));
             // Desync corrections of enforced playback (values written because the game drifted from the bake).
@@ -1082,6 +1105,9 @@ namespace UltrakillTAS
                 _engine.LoadStateSlot(_plugin.ActiveStateSlot.Value);
             GUILayout.Label(_states.SlotSummary(_plugin.ActiveStateSlot.Value), _hintStyle);
             GUILayout.EndHorizontal();
+            _plugin.ResetToMapCheckpointOnLoad.Value = Tog(_plugin.ResetToMapCheckpointOnLoad.Value,
+                "Load the last map checkpoint before a savestate (arenas reset)",
+                "Before a savestate or norefresh checkpoint is restored, reload the level exactly like the pause menu's CHECKPOINT button: the last map checkpoint you touched respawns the player, rebuilds its rooms and arenas, re-arms its checkpoint-scoped objects and restores its kills/style, so the saved values are written on top of a fresh checkpoint instead of whatever you did after it. With it on, the pause menu's own CHECKPOINT button also loads the game's checkpoint and then restores the active savestate on top of it. A savestate load runs the game reload first and applies the savestate two frames later, after Unity flushes the game's deferred destruction of the old rooms. The rooms it builds are kept out of the load's orphan cleanup, so their fresh enemies and hazards survive. Skipped when no checkpoint has been touched or the level is already finished. Off by default: it replaces the live room objects, which costs a moment.");
             EndCard();
         }
 
@@ -1304,8 +1330,8 @@ namespace UltrakillTAS
             BeginCard("Current framebulk");
             Hint("Edits are live during playback. " + ColumnHeader);
             GUILayout.BeginHorizontal();
-            Lbl("autofuncs", "Automatic helpers on this line: j autojump, s autoslide, d autodash, c coin assist, g ground slam, w whiplash assist, t coin throw (once per bulk), e deadcoin (when a coin is airborne: aim one frame, fire the next, then the aim is yours again).", GUILayout.Width(70));
-            _autofuncsText = Field(_autofuncsText, "Ten characters, '-' for off.", GUILayout.Width(104));
+            Lbl("autofuncs", "Automatic helpers on this line: j autojump, s autoslide, S spam autoslide (alternate Slide on/off while grounded), d autodash, c coin assist, g ground slam, w whiplash assist, t coin throw (once per bulk), e deadcoin (when a coin is airborne: aim one frame, fire the next, then the aim is yours again), m/m0 ssj macro (slide, release, jump: 3 ticks), m1/m2 add blank wait ticks for weaker SSJs.", GUILayout.Width(70));
+            _autofuncsText = Field(_autofuncsText, "Ten slots, '-' for off. S spams autoslide; m0 is the perfect SSJ; m1/m2 add blank ticks.", GUILayout.Width(104));
             Lbl("movement", "Movement keys held: f forward, l left, r right, b back, d dash, s slide.", GUILayout.Width(66));
             _movementText = Field(_movementText, "Six characters, '-' for off.", GUILayout.Width(64));
             Lbl("actions", "Actions: j jump, 1 fire, 2 alt fire, p punch, v whiplash, wN weapon slot, x change fist, and more (see the guide).", GUILayout.Width(52));
@@ -1322,7 +1348,7 @@ namespace UltrakillTAS
             _pitchText = Field(_pitchText, "Pitch value.", GUILayout.Width(80));
             Hint("(- keeps / inherits)");
             GUILayout.EndHorizontal();
-            Hint("autofuncs: a j s d c g w t e   movement: f l r b d s   actions: j 1 2 p v wN x F K N P T < > yN S (see spec)");
+            Hint("autofuncs: j s S d c g w t e m0-m9   movement: f l r b d s   actions: j 1 2 p v wN x F K N P T < > yN S (see spec)");
             GUILayout.BeginHorizontal();
             Lbl("commands", "Console-style commands for this line, separated by ';'. Prefix one with once: to run it on the first tick only.", GUILayout.Width(70));
             _commandsText = Field(_commandsText, "Example: once:echo hello; click");
@@ -2110,6 +2136,19 @@ namespace UltrakillTAS
             _plugin.RecordCleanRender.Value = Tog(_plugin.RecordCleanRender.Value,
                 "Clean render while recording (hide TAS HUD, hitboxes, triggers, trajectory; show viewmodels)",
                 "Hide every TAS overlay while the video renders, so only the game is filmed.");
+            BakeManager bake = _time.Bake;
+            if (bake != null)
+            {
+                bool baked = bake.EnableBakedPlayback.Value;
+                bool wantBaked = Tog(baked,
+                    "Record TAS playback with baked inputs (NOT LEGIT)",
+                    "Turn on Enable Baked Playback for this recording: replay the script's .ukbake state from tick 0, then render every tick. The run and video are NOT SUBMITTABLE. Requires valid .ukbake files for the script's bake blocks.");
+                if (wantBaked != baked)
+                    bake.EnableBakedPlayback.Value = wantBaked;
+                if (wantBaked)
+                    GUILayout.Label("NOT LEGIT: this recording uses stored baked state.", _errorStyle);
+            }
+            Hint("Performance Render Mode is suspended while a video recording is active and restored when it ends.");
             EndCard();
 
             BeginCard("Render");
@@ -2121,14 +2160,33 @@ namespace UltrakillTAS
             }
             else if (BtnPrimary("Start Recording", "Start rendering the run to a video with the settings above.", GUILayout.Width(160)) && video != null)
             {
-                string directory = _plugin.RecordingDirectory.Value;
-                if (string.IsNullOrEmpty(directory))
-                    directory = System.IO.Path.Combine(_plugin.ScriptDirectory, "Recordings");
-                string file = string.IsNullOrEmpty(_recordFileText) ? "run.mp4" : _recordFileText;
-                if (!video.Start(System.IO.Path.Combine(directory, file),
-                        RecordFpsOptions[_recordFpsIndex], RecordSampleOptions[_recordSampleIndex], _recordShutter))
+                bool canStart = true;
+                bool bakedRecording = _time.Bake != null && _time.Bake.EnableBakedPlayback.Value;
+                if (bakedRecording)
                 {
-                    _plugin.Toast(video.LastError, true);
+                    if (_engine.Mode == EngineMode.Recording)
+                    {
+                        _plugin.Toast("Stop the input recording before starting a TAS video.", true);
+                        canStart = false;
+                    }
+                    else if (!_engine.Play())
+                    {
+                        _plugin.Toast(_engine.LastError, true);
+                        canStart = false;
+                    }
+                }
+
+                if (canStart)
+                {
+                    string directory = _plugin.RecordingDirectory.Value;
+                    if (string.IsNullOrEmpty(directory))
+                        directory = System.IO.Path.Combine(_plugin.ScriptDirectory, "Recordings");
+                    string file = string.IsNullOrEmpty(_recordFileText) ? "run.mp4" : _recordFileText;
+                    if (!video.Start(System.IO.Path.Combine(directory, file),
+                            RecordFpsOptions[_recordFpsIndex], RecordSampleOptions[_recordSampleIndex], _recordShutter))
+                    {
+                        _plugin.Toast(video.LastError, true);
+                    }
                 }
             }
 

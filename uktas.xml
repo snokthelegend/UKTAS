@@ -34,7 +34,7 @@
             <!-- Commands run from a framebulk's command field or a load_command line -->
             <Keywords name="Keywords3">bxt_timer_start bxt_timer_stop bxt_timer_reset timer_start timer_stop timer_reset load_state loadstate ls save_state savestate ss pause unpause echo print log weapon slot variation sv_cheats mouse mousef mouse_rel glide glidef click mouse_down mouse_up scroll load_level wait_scene wait_control ff look_at optim_start optim_end bxt_tas_optim_init record_stop</Keywords>
             <!-- Special frame keywords (UktasSyntax.SpecialWords) -->
-            <Keywords name="Keywords4">save seed target_yaw norefresh ff fff change look_at yaw pitch to over bake_start bake_end record_video record_video_stop</Keywords>
+            <Keywords name="Keywords4">save seed target_yaw fist norefresh ff fff change look_at yaw pitch to over bake_start bake_start_nme bake_end record_video record_video_stop</Keywords>
             <!-- Modifiers (UktasSyntax.Modifiers): once: prefix and click buttons -->
             <Keywords name="Keywords5">once left right middle lmb rmb mmb</Keywords>
             <Keywords name="Keywords6"></Keywords>

@@ -495,6 +495,12 @@ namespace UltrakillTAS
         readonly List<Vector3> _optBest = new List<Vector3>();
         readonly List<Vector3> _optCandidate = new List<Vector3>();
         OptimBoxSet _optBoxes;
+        OptimGeometryProbe _optGeometry;
+        bool _optShowWhiskers;
+        int _optimizerPathVersion;
+        /// <summary>Bumped whenever the three path lists are replaced or cleared, so the GUI can
+        /// re-push them after an external clear (a scene change) instead of trusting stale refs.</summary>
+        public int OptimizerPathVersion { get { return _optimizerPathVersion; } }
         static readonly Color OptBaselineColor = new Color(1f, 1f, 1f, 0.85f);
         static readonly Color OptBestColor = new Color(0.2f, 1f, 0.95f, 0.95f);
         static readonly Color OptCandidateColor = new Color(0f, 0.45f, 0.45f, 0.9f);
@@ -505,6 +511,7 @@ namespace UltrakillTAS
             CopyInto(_optBaseline, baseline);
             CopyInto(_optBest, best);
             CopyInto(_optCandidate, candidate);
+            _optimizerPathVersion++;
         }
 
         public void SetOptimizerBoxes(OptimBoxSet boxes)
@@ -512,12 +519,27 @@ namespace UltrakillTAS
             _optBoxes = boxes;
         }
 
+        /// <summary>Last bonk probe and whether the optimizer tab wants its whisker fan drawn.</summary>
+        public void SetOptimizerGeometry(OptimGeometryProbe probe, bool visible)
+        {
+            _optGeometry = probe;
+            _optShowWhiskers = visible;
+        }
+
         public void ClearOptimizer()
+        {
+            ClearOptimizerPaths();
+            _optBoxes = null;
+        }
+
+        /// <summary>Clears the three paths but leaves the spatial boxes in place.</summary>
+        public void ClearOptimizerPaths()
         {
             _optBaseline.Clear();
             _optBest.Clear();
             _optCandidate.Clear();
-            _optBoxes = null;
+            _optGeometry = null;
+            _optimizerPathVersion++;
         }
 
         static void CopyInto(List<Vector3> target, IList<Vector3> source)
@@ -531,7 +553,9 @@ namespace UltrakillTAS
         {
             bool hasPath = _optBaseline.Count >= 2 || _optBest.Count >= 2 || _optCandidate.Count >= 2;
             bool hasBoxes = _optBoxes != null && _optBoxes.Boxes.Count > 0;
-            if (!hasPath && !hasBoxes)
+            bool hasWhiskers = _optShowWhiskers && _optGeometry != null && _optGeometry.HasImpact &&
+                               _optGeometry.Whiskers.Count > 0;
+            if (!hasPath && !hasBoxes && !hasWhiskers)
                 return;
             EnsureMaterial();
             _material.SetPass(0);
@@ -549,7 +573,67 @@ namespace UltrakillTAS
                     DrawBoxWire(box, BoxColor(box.Kind));
                 }
             }
+            if (hasWhiskers)
+            {
+                // Debug probes read best through walls and floors, then the normal depth test is
+                // restored for the next frame's paths and boxes.
+                _material.SetInt("_ZTest", (int)UnityEngine.Rendering.CompareFunction.Always);
+                _material.SetPass(0);
+                DrawGeometryWhiskers(_optGeometry);
+                _material.SetInt("_ZTest", (int)UnityEngine.Rendering.CompareFunction.LessEqual);
+                _material.SetPass(0);
+            }
             GL.PopMatrix();
+        }
+
+        /// <summary>
+        /// The geometry probe fan: red rays for wall hits, a bright green line for the chosen
+        /// clearance direction and a yellow cross where the nearest corner / doorway lip is.
+        /// </summary>
+        static void DrawGeometryWhiskers(OptimGeometryProbe probe)
+        {
+            Vector3 origin = probe.ProbeOrigin;
+            GL.Begin(GL.LINES);
+            for (int i = 0; i < probe.Whiskers.Count; i++)
+            {
+                OptimWhisker whisker = probe.Whiskers[i];
+                if (!whisker.Hit)
+                    continue;
+                float alpha = Mathf.Lerp(0.85f, 0.15f, Mathf.Clamp01(whisker.Distance / 20f));
+                GL.Color(new Color(1f, 0.16f, 0.1f, alpha));
+                GL.Vertex(origin);
+                GL.Vertex(whisker.Point);
+            }
+            GL.End();
+
+            Vector3 direction = probe.ClearanceDirection;
+            float length = Mathf.Clamp(probe.ClearanceDistance, 2f, 8f);
+            Vector3 tip = origin + direction * length;
+            Vector3 side = Vector3.Cross(Vector3.up, direction).normalized;
+            GL.Begin(GL.LINES);
+            GL.Color(new Color(0.25f, 1f, 0.3f, 0.95f));
+            GL.Vertex(origin);
+            GL.Vertex(tip);
+            GL.Vertex(tip);
+            GL.Vertex(tip - direction * 0.4f + side * 0.18f);
+            GL.Vertex(tip);
+            GL.Vertex(tip - direction * 0.4f - side * 0.18f);
+            GL.End();
+
+            if (probe.CornerFound)
+            {
+                const float s = 0.3f;
+                Vector3 p = probe.CornerPoint;
+                GL.Begin(GL.LINES);
+                GL.Color(new Color(1f, 0.92f, 0.15f, 0.95f));
+                GL.Vertex(p + Vector3.up * s);
+                GL.Vertex(p - Vector3.up * s);
+                GL.Vertex(p + Vector3.right * s);
+                GL.Vertex(p - Vector3.right * s);
+                GL.Vertex(p + Vector3.forward * s);
+                GL.Vertex(p - Vector3.forward * s);
+                GL.End();
+            }
         }
 
         static void DrawPolyline(List<Vector3> points, Color color)

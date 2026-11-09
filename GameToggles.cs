@@ -53,11 +53,40 @@ namespace UltrakillTAS
         static float _cheatsSearchAt = -1f;
         static bool _cheatsLogged;
 
+        static bool _checkpointHookSnapshot;
+
         public static void Install(Plugin plugin)
         {
             _plugin = plugin;
             if (_harmony != null)
                 return;
+
+            // The pause menu's CHECKPOINT button: let the game run its own checkpoint reload,
+            // then put the active savestate back on top of it (Savestates card setting).
+            try
+            {
+                _harmony = new Harmony("com.tas.ultrakill.gametoggles");
+                Type options = AccessTools.TypeByName("OptionsManager");
+                MethodInfo restartCheckpoint = options != null
+                    ? AccessTools.Method(options, "RestartCheckpoint", Type.EmptyTypes)
+                    : null;
+                if (restartCheckpoint != null)
+                {
+                    BindingFlags hookFlags = BindingFlags.Static | BindingFlags.NonPublic;
+                    _harmony.Patch(restartCheckpoint,
+                                   prefix: new HarmonyMethod(typeof(GameToggles).GetMethod("CheckpointPrefix", hookFlags)),
+                                   postfix: new HarmonyMethod(typeof(GameToggles).GetMethod("CheckpointPostfix", hookFlags)));
+                    plugin.LogInfo("CHECKPOINT button hooked: it can restore the active savestate after the game checkpoint load.");
+                }
+                else
+                {
+                    plugin.LogWarning("CHECKPOINT button hook skipped: OptionsManager.RestartCheckpoint not found.");
+                }
+            }
+            catch (Exception ex)
+            {
+                plugin.LogWarning("CHECKPOINT button hook failed: " + ex.Message);
+            }
 
             try
             {
@@ -329,6 +358,34 @@ namespace UltrakillTAS
             if (paused == null || unpause == null || !(bool)paused.GetValue(options))
                 return;
             unpause.Invoke(options, null);
+        }
+
+        // ------------------------------------------------------------------
+        // Pause-menu CHECKPOINT -> savestate
+        // ------------------------------------------------------------------
+
+        static void CheckpointPrefix()
+        {
+            _checkpointHookSnapshot = false;
+            Plugin plugin = _plugin;
+            TasEngine engine = plugin != null ? plugin.Engine : null;
+            if (engine == null)
+                return;
+            if (plugin.ResetToMapCheckpointOnLoad == null || !plugin.ResetToMapCheckpointOnLoad.Value)
+                return;
+            engine.BeginCheckpointButtonReload();
+            _checkpointHookSnapshot = true;
+        }
+
+        static void CheckpointPostfix()
+        {
+            if (!_checkpointHookSnapshot)
+                return;
+            _checkpointHookSnapshot = false;
+            Plugin plugin = _plugin;
+            TasEngine engine = plugin != null ? plugin.Engine : null;
+            if (engine != null)
+                engine.EndCheckpointButtonReload();
         }
 
         // ------------------------------------------------------------------

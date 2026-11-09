@@ -85,19 +85,25 @@ namespace UltrakillTAS
     ///   slot 1  -  reserved (always '-')
     ///   slot 2  j  autojump       (jump the exact tick the player lands)
     ///   slot 3  s  autoslide      (hold slide on every grounded tick, from the landing tick)
+    ///           S  spam autoslide (same gate, but press Slide on alternating eligible ticks)
     ///   slot 4  d  autodash       (dash on the optimal recovery tick)
     ///   slot 5  c  coin aim assist(snap viewangles to the nearest coin on fire ticks)
     ///   slot 6  g  ground slam    (hold slide in the air while a slam is valid; never on the ground)
     ///   slot 7  w  whiplash assist(hook when in range)
     ///   slot 8  t  cointhrow       (solve the coin toss angle, once per framebulk)
     ///   slot 9  e  deadcoin        (shoot a coin, then toss the follow-up inside its dead window)
-    ///   slot 10 reserved dash
+    ///   slot 10 m  ssj macro       (slide one tick, wait N blank ticks, then jump)
     ///
     /// The letters are parsed in any position (see TasInputColumns.ParseAutofuncs). They act
     /// during script playback (Playing, and single steps while Paused) in TasEngine.ExecuteTick:
-    /// 'j' 's' 'd' 'g' in ApplyMovementAutofuncs, 'c' 'w' in ApplyAimAutofuncs, and 't' in
-    /// ApplyCoinThrow, which runs only on the first tick of the framebulk that holds it.
+    /// 'j' 's' 'S' 'd' 'g' 'm' in ApplyMovementAutofuncs, 'c' 'w' in ApplyAimAutofuncs, and 't'
+    /// in ApplyCoinThrow, which runs only on the first tick of the framebulk that holds it.
     /// Standalone and Recording run no framebulks, so no autofunc applies there.
+    ///
+    /// 'm' is followed by an optional variant digit: 'm' / 'm0' is the 3-tick perfect SSJ
+    /// (slide, one blank release, jump), 'm1' adds one more blank tick for the 4-tick half boost,
+    /// and 'm2' adds two for the 5-tick quarter boost. The digit is part of field 1, so an mN
+    /// variant may make that field 11 characters long; the parser accepts any field length.
     /// </summary>
     [Flags]
     public enum TasAutofuncs : uint
@@ -105,6 +111,7 @@ namespace UltrakillTAS
         None = 0u,
         // 1u << 0 (slot 1) is unused.
         AutoJump = 1u << 1,
+        /// <summary>Slot 3 's': hold Slide on every grounded tick.</summary>
         AutoSlide = 1u << 2,
         AutoDash = 1u << 3,
         CoinAim = 1u << 4,
@@ -120,7 +127,28 @@ namespace UltrakillTAS
         /// coin; a few ticks later toss a second coin while it is still unhittable, so the shot's
         /// chain transfers its power to it without ricoshoting.
         /// </summary>
-        Deadcoin = 1u << 8
+        Deadcoin = 1u << 8,
+        /// <summary>
+        /// Slot 10 'm': SSJ macro. One slide tick on the landing frame, then N blank ticks with
+        /// Slide and Jump released, then Jump. 'm' / 'm0' is the perfect 3-tick pattern; 'm1'
+        /// waits one extra blank tick (4 ticks, half boost), 'm2' waits two (5 ticks, quarter
+        /// boost). The slide starts again on the landing tick, so the pattern repeats.
+        /// </summary>
+        SSJMacro = 1u << 9,
+        /// <summary>
+        /// The optional variant digit after 'm' is stored in bits 10-13 (0-9 blank waits).
+        /// These bits are only meaningful together with <see cref="SSJMacro"/>.
+        /// </summary>
+        SSJMacroVariantMask = 0xFu << 10,
+        /// <summary>Everything that makes up the SSJ macro setting, including its variant.</summary>
+        SSJMacroMask = SSJMacro | SSJMacroVariantMask,
+        /// <summary>
+        /// Slot 3 'S': spam autoslide. It uses the same grounded/jump/SSJ gate as 's', but presses
+        /// Slide only on alternate eligible ticks instead of holding it.
+        /// </summary>
+        AutoSlideSpam = 1u << 14,
+        /// <summary>Both autoslide forms; a parsed field normally sets only one.</summary>
+        AutoSlideMask = AutoSlide | AutoSlideSpam
     }
 
     public enum TasStartType
@@ -194,8 +222,15 @@ namespace UltrakillTAS
         /// </summary>
         LookAt,
         /// <summary>
-        /// bake_start [name]: takes no ticks. Opens a bake block; the ticks up to the matching
-        /// bake_end are recorded into (or played back from) a .ukbake sidecar (see BakeManager).
+        /// fist &lt;arm&gt;: takes no ticks. Selects the Feedbacker or Knuckleblaster on the first tick
+        /// of the next framebulk by injecting the game's normal change-fist action when the
+        /// requested arm is not already equipped.
+        /// </summary>
+        Fist,
+        /// <summary>
+        /// bake_start [name] / bake_start_nme [name]: takes no ticks. Opens a bake block; the ticks
+        /// up to the matching bake_end are recorded into (or played back from) a .ukbake sidecar
+        /// (see BakeManager). The _nme form leaves doors and streamed map rooms out of the bake.
         /// </summary>
         BakeStart,
         /// <summary>bake_end: takes no ticks. Closes the open bake block.</summary>
@@ -226,7 +261,7 @@ namespace UltrakillTAS
     /// Field 1, 2 and 3 of the canonical eight-field framebulk. Every field is a
     /// fixed-width dash string exactly like BunnyMod XT writes them:
     ///
-    ///   field 1  ----------   autofuncs  [-][j][s][d][c][g][w][-][-][-]
+    ///   field 1  ----------   autofuncs  [-][j][s][d][c][g][w][-][-][mN]
     ///   field 2  ------       movement   [f][l][r][b][d][s]
     ///   field 3  ------       actions    [j][1][2][p][v][w]
     ///
@@ -245,19 +280,22 @@ namespace UltrakillTAS
         public const string NeutralMovement = "------";
         public const string NeutralActions = "------";
 
+        // Ten base slots. An SSJ variant is written directly after 'm' ('---------m1'), so
+        // that one field may be eleven characters long; parsing never enforced the width.
         public const int AutofuncWidth = 10;
         public const int MovementWidth = 6;
         public const int ActionWidth = 6;
 
-        static readonly char[] AutofuncOrder = { 'j', 's', 'd', 'c', 'g', 'w', 't', 'e' };
+        static readonly char[] AutofuncOrder = { 'j', 's', 'd', 'c', 'g', 'w', 't', 'e', 'm' };
         static readonly TasAutofuncs[] AutofuncFlags =
         {
             TasAutofuncs.AutoJump, TasAutofuncs.AutoSlide,
             TasAutofuncs.AutoDash, TasAutofuncs.CoinAim, TasAutofuncs.GroundSlam,
-            TasAutofuncs.WhipAssist, TasAutofuncs.CoinThrow, TasAutofuncs.Deadcoin
+            TasAutofuncs.WhipAssist, TasAutofuncs.CoinThrow, TasAutofuncs.Deadcoin,
+            TasAutofuncs.SSJMacro
         };
-        // Written column of each letter: slot 1 stays '-', so j is slot 2 ... e is slot 9.
-        static readonly int[] AutofuncSlots = { 1, 2, 3, 4, 5, 6, 7, 8 };
+        // Written column of each letter: slot 1 stays '-', so j is slot 2 ... e is slot 9, m is slot 10.
+        static readonly int[] AutofuncSlots = { 1, 2, 3, 4, 5, 6, 7, 8, 9 };
 
         // ------------------------------------------------------------------
         // Field 1 - autofuncs
@@ -272,17 +310,55 @@ namespace UltrakillTAS
             string field = text.Trim();
             for (int i = 0; i < field.Length; i++)
             {
+                // 'S' is the one case-sensitive autofunc: lowercase s holds Slide, uppercase S
+                // spam-presses it. Every other letter keeps its old case-insensitive handling.
+                if (field[i] == 'S')
+                {
+                    result &= ~TasAutofuncs.AutoSlide;
+                    result |= TasAutofuncs.AutoSlideSpam;
+                    continue;
+                }
+
                 char c = char.ToLowerInvariant(field[i]);
                 if (c == '-' || c == '.' || c == ' ')
                     continue;
 
+                if (c == 's')
+                {
+                    result &= ~TasAutofuncs.AutoSlideSpam;
+                    result |= TasAutofuncs.AutoSlide;
+                    continue;
+                }
+
+                if (c == 'm')
+                {
+                    // The optional digit after m selects the SSJ variant: m/m0 is the perfect
+                    // three-tick pattern, m1 adds a blank wait, m2 adds two, and so on. A bare m
+                    // is variant 0, so old scripts keep their behaviour.
+                    result |= TasAutofuncs.SSJMacro;
+                    result &= ~TasAutofuncs.SSJMacroVariantMask;
+                    if (i + 1 < field.Length && field[i + 1] >= '0' && field[i + 1] <= '9')
+                    {
+                        int blanks = field[i + 1] - '0';
+                        result |= (TasAutofuncs)((uint)blanks << 10);
+                        i++;
+                    }
+                    continue;
+                }
+
                 int slot = Array.IndexOf(AutofuncOrder, c);
                 if (slot < 0)
                     throw new TasParseException(lineNumber, sourceLine,
-                        "unknown autofunc '" + field[i] + "' in field 1 (valid: j s d c g w t e, - for inactive)");
+                        "unknown autofunc '" + field[i] + "' in field 1 (valid: j s S d c g w t e m[0-9], - for inactive)");
                 result |= AutofuncFlags[slot];
             }
             return result;
+        }
+
+        /// <summary>Blank ticks requested by an mN SSJ variant (0 for bare m).</summary>
+        public static int SsjMacroBlankFrames(TasAutofuncs value)
+        {
+            return (int)(((uint)value & (uint)TasAutofuncs.SSJMacroVariantMask) >> 10);
         }
 
         public static string FormatAutofuncs(TasAutofuncs value)
@@ -293,7 +369,14 @@ namespace UltrakillTAS
             for (int i = 0; i < AutofuncOrder.Length; i++)
                 if ((value & AutofuncFlags[i]) != 0)
                     slots[AutofuncSlots[i]] = AutofuncOrder[i];
-            return new string(slots);
+            // Both bits could be present in a hand-built value; uppercase S is the spam form.
+            if ((value & TasAutofuncs.AutoSlideSpam) != 0)
+                slots[AutofuncSlots[1]] = 'S';
+            string field = new string(slots);
+            int blanks = SsjMacroBlankFrames(value);
+            if ((value & TasAutofuncs.SSJMacro) != 0 && blanks > 0)
+                field += (char)('0' + blanks);
+            return field;
         }
 
         // ------------------------------------------------------------------
@@ -688,7 +771,7 @@ namespace UltrakillTAS
 
     /// <summary>
     /// One authored line of the frames section: either an eight-field framebulk or
-    /// one of the hltas special frames (save / seed / change ... / target_yaw).
+    /// one of the special frames (save / seed / change ... / target_yaw / fist).
     /// </summary>
     public sealed class TasFrameLine
     {
@@ -748,8 +831,17 @@ namespace UltrakillTAS
         public double LookAtPointY;
         public double LookAtPointZ;
 
-        /// <summary>Name of a bake_start line (may be empty: the block index names it).</summary>
+        /// <summary>fist payload: the arm a "fist ..." special frame requests.</summary>
+        public TasStartFist FistTarget = TasStartFist.Unchanged;
+
+        /// <summary>Name of a bake_start / bake_start_nme line (may be empty: the block index names it).</summary>
         public string BakeName = string.Empty;
+
+        /// <summary>
+        /// True for bake_start_nme: doors and the streamed rooms they activate are map elements and
+        /// are left out of the recorded/restored bake. Everything else is baked normally.
+        /// </summary>
+        public bool BakeExcludeMapElements;
 
         /// <summary>File name of a record_video line (a single token).</summary>
         public string RecordFile = string.Empty;
@@ -796,7 +888,9 @@ namespace UltrakillTAS
                 LookAtPointX = LookAtPointX,
                 LookAtPointY = LookAtPointY,
                 LookAtPointZ = LookAtPointZ,
+                FistTarget = FistTarget,
                 BakeName = BakeName,
+                BakeExcludeMapElements = BakeExcludeMapElements,
                 RecordFile = RecordFile,
                 SourceLine = SourceLine
             };
@@ -916,8 +1010,13 @@ namespace UltrakillTAS
                     return "ff";
                 case TasFrameKind.NoRefreshBreak:
                     return "FFF";
+                case TasFrameKind.Fist:
+                    return "fist " + TasScript.FormatStartFist(FistTarget);
                 case TasFrameKind.BakeStart:
-                    return BakeName.Length > 0 ? "bake_start " + BakeName : "bake_start";
+                {
+                    string command = BakeExcludeMapElements ? "bake_start_nme" : "bake_start";
+                    return BakeName.Length > 0 ? command + " " + BakeName : command;
+                }
                 case TasFrameKind.BakeEnd:
                     return "bake_end";
                 case TasFrameKind.RecordVideoStart:
@@ -983,8 +1082,8 @@ namespace UltrakillTAS
     }
 
     /// <summary>
-    /// A bake_start ... bake_end block: the ticks it covers and the checksum that guards its
-    /// .ukbake sidecar. Built with the timeline; see TasScript.BakeBlocks.
+    /// A bake_start / bake_start_nme ... bake_end block: the ticks it covers and the checksum that
+    /// guards its .ukbake sidecar. Built with the timeline; see TasScript.BakeBlocks.
     /// </summary>
     public sealed class TasBakeBlock
     {
@@ -992,6 +1091,8 @@ namespace UltrakillTAS
         public int Index;
         /// <summary>Name from the bake_start line, or empty.</summary>
         public string Name = string.Empty;
+        /// <summary>True for a bake_start_nme block: map elements (doors and streamed rooms) are not baked.</summary>
+        public bool ExcludeMapElements;
         /// <summary>Name used for the sidecar file: the given name, else "block&lt;Index+1&gt;".</summary>
         public string FileName = string.Empty;
         public int StartLineIndex;
@@ -1002,6 +1103,8 @@ namespace UltrakillTAS
         public int EndTick;
         /// <summary>SHA-256 (lower-case hex) of the header and every line from the script start through bake_end.</summary>
         public string Hash = string.Empty;
+        /// <summary>Old hash used before fist selection left the bake hash; empty unless a fist header is set.</summary>
+        public string LegacyHash = string.Empty;
 
         public int TickCount { get { return EndTick - StartTick; } }
     }
@@ -1039,10 +1142,13 @@ namespace UltrakillTAS
     ///   change yaw to &lt;value&gt; over &lt;time&gt; s
     ///   change pitch to &lt;value&gt; over &lt;time&gt; s
     ///   target_yaw &lt;value&gt;
+    ///   fist parry / fist knuckleblaster
     ///   look_at entity &lt;id&gt; [hitbox] [ox oy oz]
     ///   look_at &lt;type|category&gt; [hitbox] [ox oy oz]
     ///   look_at &lt;x&gt; &lt;y&gt; &lt;z&gt;
     ///   look_at off
+    ///   bake_start [name] / bake_start_nme [name]
+    ///   bake_end
     ///   FFF
     ///
     /// FFF is the GoldSrc r_norefresh breakpoint: the ticks before it are simulated with the
@@ -1070,6 +1176,26 @@ namespace UltrakillTAS
         TasFrameLine[] _lookAtAtLine = new TasFrameLine[0];
         int _totalTicks;
         double _totalTime;
+
+        // Debug, playback only: extra ticks appended to (or taken off) one framebulk's tick count.
+        // The line's own Count is never written, so saving the script keeps the authored numbers.
+        int _adjustLine = -1;
+        int _adjustTicks;
+
+        /// <summary>
+        /// Give one framebulk more (or fewer) ticks for the current timeline only. A norefresh
+        /// resume uses it through the "bulk frames" debug dial: the resumed run's tick mapping,
+        /// totals and clock include the shift, while the script and its saved bytes do not.
+        /// Pass -1 / 0 to clear it.
+        /// </summary>
+        public void SetFrameAdjust(int lineIndex, int ticks)
+        {
+            if (_adjustLine == lineIndex && _adjustTicks == ticks)
+                return;
+            _adjustLine = lineIndex;
+            _adjustTicks = ticks;
+            InvalidateTimeline();
+        }
 
         public int TotalTicks
         {
@@ -1123,6 +1249,14 @@ namespace UltrakillTAS
             {
                 TasFrameLine line = Lines[i];
                 int count = TicksOf(line);
+                // Playback-only bulk-frame dial: the framebulk a norefresh resume starts in may
+                // hold more or fewer ticks for this run. Zero is allowed: it then owns no tick.
+                if (i == _adjustLine)
+                {
+                    count += _adjustTicks;
+                    if (count < 0)
+                        count = 0;
+                }
                 double frametime = line.EffectiveFrametime(Properties.HostFrametime);
                 _lineStartTicks[i] = (int)Math.Min(int.MaxValue, tickCursor);
                 _lineStartTimes[i] = timeCursor;
@@ -1285,23 +1419,24 @@ namespace UltrakillTAS
         }
 
         /// <summary>
-        /// Ticks a line occupies. Checkpoints and change lines take none (a change runs
-        /// alongside the framebulks after it); every other line takes at least one.
+        /// Ticks a line occupies. Checkpoints, change lines and fist/marker lines take none
+        /// (a change runs alongside the framebulks after it); every other line takes at least one.
         /// </summary>
         static int TicksOf(TasFrameLine line)
         {
             if (line.Kind == TasFrameKind.Checkpoint || line.Kind == TasFrameKind.ChangeYaw ||
                 line.Kind == TasFrameKind.ChangePitch || line.Kind == TasFrameKind.FastForwardEnd ||
                 line.Kind == TasFrameKind.NoRefreshBreak || line.Kind == TasFrameKind.LookAt ||
-                line.Kind == TasFrameKind.BakeStart || line.Kind == TasFrameKind.BakeEnd ||
-                line.Kind == TasFrameKind.RecordVideoStart || line.Kind == TasFrameKind.RecordVideoStop)
+                line.Kind == TasFrameKind.Fist || line.Kind == TasFrameKind.BakeStart ||
+                line.Kind == TasFrameKind.BakeEnd || line.Kind == TasFrameKind.RecordVideoStart ||
+                line.Kind == TasFrameKind.RecordVideoStop)
                 return 0;
             return line.Count < 1 ? 1 : line.Count;
         }
 
         /// <summary>
         /// Index of the first line of the run of zero-tick lines (norefresh, ff, FFF, look_at,
-        /// bake and record_video markers, change lines) that sits directly before
+        /// fist, bake and record_video markers, change lines) that sits directly before
         /// <paramref name="lineIndex"/>. Returns <paramref name="lineIndex"/> itself when the
         /// line has no zero-tick line before it. Playback walks this run when it reaches the
         /// first tick of a line, because a zero-tick line never owns a tick of its own.
@@ -1575,7 +1710,9 @@ namespace UltrakillTAS
         /// through the block's bake_end, in the same auto-bulked form the norefresh checksum uses (so a
         /// script hashes the same in memory and after a save). Markers and pacing lines (bake_start,
         /// bake_end, ff, FFF) are not part of it: adding, renaming or moving them invalidates nothing.
-        /// Any change to an input, angle, frametime, count or command before or inside the block does.
+        /// Fist selection (the header and mid-script "fist" lines) is deliberately excluded too, so
+        /// adding it does not force a re-bake; the live arm is read when the line runs. Any change to
+        /// an input, angle, frametime, count or command before or inside the block does.
         /// </summary>
         void BuildBakeBlocks()
         {
@@ -1587,7 +1724,14 @@ namespace UltrakillTAS
                 return;
 
             StringBuilder prefix = new StringBuilder(4096);
-            AppendHeaderCanonical(prefix);
+            AppendHeaderCanonical(prefix, false);
+            // Older sidecars hashed the top-level fist header. Keep their hash as a fallback so
+            // existing fist bakes stay usable after this change.
+            StringBuilder legacyPrefix = Properties.StartFist != TasStartFist.Unchanged
+                ? new StringBuilder(4096)
+                : null;
+            if (legacyPrefix != null)
+                AppendHeaderCanonical(legacyPrefix, true);
             TasFrameLine open = null;
             TasBakeBlock current = null;
             HashSet<string> names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -1606,6 +1750,7 @@ namespace UltrakillTAS
                     {
                         Index = _bakeBlocks.Count,
                         Name = line.BakeName ?? string.Empty,
+                        ExcludeMapElements = line.BakeExcludeMapElements,
                         StartLineIndex = i,
                         StartTick = _lineStartTicks[i]
                     };
@@ -1623,8 +1768,12 @@ namespace UltrakillTAS
                     current.FileName = current.Name.Length > 0
                         ? current.Name
                         : "block" + (current.Index + 1).ToString(CultureInfo.InvariantCulture);
-                    string text = open == null ? prefix.ToString() : prefix.ToString() + open.ToPipeLine() + "\n";
-                    current.Hash = HashText(text);
+                    // A mode marker makes the NME block's hash distinct from the normal block's,
+                    // so an existing full bake is never reused when the command is switched. Normal
+                    // blocks keep their old hash exactly (the marker is only added for NME).
+                    current.Hash = BakeHash(prefix, current.ExcludeMapElements, open);
+                    if (legacyPrefix != null)
+                        current.LegacyHash = BakeHash(legacyPrefix, current.ExcludeMapElements, open);
                     if (current.TickCount <= 0)
                         AddWarning("bake block '" + current.FileName + "' covers no ticks; it is ignored.");
                     else if (!names.Add(current.FileName))
@@ -1635,7 +1784,8 @@ namespace UltrakillTAS
                     continue;
                 }
                 if (line.Kind == TasFrameKind.FastForwardEnd || line.Kind == TasFrameKind.NoRefreshBreak ||
-                    line.Kind == TasFrameKind.RecordVideoStart || line.Kind == TasFrameKind.RecordVideoStop)
+                    line.Kind == TasFrameKind.RecordVideoStart || line.Kind == TasFrameKind.RecordVideoStop ||
+                    line.Kind == TasFrameKind.Fist)
                     continue;
                 if (open != null && open.BehaviourEquals(line))
                 {
@@ -1644,11 +1794,27 @@ namespace UltrakillTAS
                     continue;
                 }
                 if (open != null)
-                    prefix.Append(open.ToPipeLine()).Append('\n');
+                {
+                    string row = open.ToPipeLine() + "\n";
+                    prefix.Append(row);
+                    if (legacyPrefix != null)
+                        legacyPrefix.Append(row);
+                }
                 open = line.Clone();
             }
             if (current != null)
                 AddWarning("bake_start '" + current.Name + "' is never closed with bake_end; that block is ignored.");
+        }
+
+        /// <summary>One bake block's checksum: prefix rows, the NME marker and the open row.</summary>
+        static string BakeHash(StringBuilder prefix, bool excludeMapElements, TasFrameLine open)
+        {
+            string text = prefix.ToString();
+            if (excludeMapElements)
+                text += "bake_start_nme\n";
+            if (open != null)
+                text += open.ToPipeLine() + "\n";
+            return HashText(text);
         }
 
         /// <summary>
@@ -1668,7 +1834,8 @@ namespace UltrakillTAS
                 {
                     if (open != null)
                         throw new TasParseException(line.SourceLine, SourceText(sourceLines, line.SourceLine),
-                            "bake_start inside the bake block opened at line " + open.SourceLine +
+                            (line.BakeExcludeMapElements ? "bake_start_nme" : "bake_start") +
+                            " inside the bake block opened at line " + open.SourceLine +
                             " (bake blocks cannot nest; close it with bake_end first)");
                     open = line;
                     blockIndex++;
@@ -1686,13 +1853,13 @@ namespace UltrakillTAS
                 {
                     if (open == null)
                         throw new TasParseException(line.SourceLine, SourceText(sourceLines, line.SourceLine),
-                            "bake_end without a matching bake_start");
+                            "bake_end without a matching bake_start or bake_start_nme");
                     open = null;
                 }
             }
             if (open != null)
                 throw new TasParseException(open.SourceLine, SourceText(sourceLines, open.SourceLine),
-                    "bake_start is never closed: add bake_end before the end of the script");
+                    "bake_start or bake_start_nme is never closed: add bake_end before the end of the script");
         }
 
         static string SourceText(string[] sourceLines, int lineNumber)
@@ -1702,7 +1869,7 @@ namespace UltrakillTAS
                 : string.Empty;
         }
 
-        void AppendHeaderCanonical(StringBuilder sb)
+        void AppendHeaderCanonical(StringBuilder sb, bool includeStartFist = true)
         {
             TasProperties p = Properties;
             sb.Append("version ").Append(p.Version.ToString(CultureInfo.InvariantCulture)).Append('\n');
@@ -1712,7 +1879,8 @@ namespace UltrakillTAS
             sb.Append("wait_for_control ").Append(p.WaitForPlayerControl ? "true" : "false").Append('\n');
             sb.Append("load_command ").Append(p.LoadCommand ?? string.Empty).Append('\n');
             // Only when set, so scripts without the header keep their existing checksums.
-            if (p.StartFist != TasStartFist.Unchanged)
+            // BuildBakeBlocks passes false: fist selection is not part of a bake hash.
+            if (includeStartFist && p.StartFist != TasStartFist.Unchanged)
                 sb.Append("fist ").Append(FormatStartFist(p.StartFist)).Append('\n');
             if (p.Difficulty != TasDifficulty.Unchanged)
                 sb.Append("difficulty ").Append(FormatDifficulty(p.Difficulty)).Append('\n');
@@ -1789,6 +1957,32 @@ namespace UltrakillTAS
                 byte[] bytes = sha.ComputeHash(Encoding.UTF8.GetBytes(text ?? string.Empty));
                 return BitConverter.ToString(bytes).Replace("-", string.Empty).ToLowerInvariant();
             }
+        }
+
+        /// <summary>
+        /// SHA-256 of the canonical rows that own ticks [startTick, startTick + tickCount). The
+        /// norefresh sync bake is stamped with it, so a resume only uses that bake while the frames
+        /// after the marker are exactly the ones it was recorded with.
+        /// </summary>
+        public string HashTickRange(int startTick, int tickCount)
+        {
+            if (startTick < 0 || tickCount <= 0)
+                return string.Empty;
+            EnsureTimeline();
+            int end = startTick + tickCount;
+            StringBuilder sb = new StringBuilder();
+            sb.Append("norefresh-sync ").Append(startTick).Append(' ').Append(tickCount);
+            // Authored counts, not the timeline: the bulk-frames debug dial shifts the live
+            // timeline, and it must not change which rows the stamp covers.
+            int cursor = 0;
+            for (int i = 0; i < Lines.Count; i++)
+            {
+                int lineEnd = cursor + TicksOf(Lines[i]);
+                if (lineEnd > startTick && cursor < end)
+                    sb.Append('\n').Append(Lines[i].ToPipeLine());
+                cursor = lineEnd;
+            }
+            return HashText(sb.ToString());
         }
 
         public TasFrameLine AppendFrame(TasFrameLine line)
@@ -2401,7 +2595,7 @@ namespace UltrakillTAS
             // Slide, so the slam keeps the press down (held-slam landing shockwave) and the landing
             // has no fresh press for 's' to start a ground slide.
             if ((line.Autofuncs & TasAutofuncs.GroundSlam) != 0 && (line.Buttons & TasButtons.Slide) != 0)
-                script.AddWarning("Line " + lineNumber + ": autofunc 'g' with Slide held by the framebulk: the held press stops the slam from releasing Slide (held-slam), and the landing gets no fresh Slide press for autoslide. Remove the movement 's' and let g/s press it.");
+                script.AddWarning("Line " + lineNumber + ": autofunc 'g' with Slide held by the framebulk: the held press stops the slam from releasing Slide (held-slam), and the landing gets no fresh Slide press for autoslide. Remove the movement 's' and let g/s/S press it.");
 
             string ftText = cols[3].Trim();
             if (ftText.Length > 0 && ftText != "-")
@@ -2490,6 +2684,25 @@ namespace UltrakillTAS
                     };
                     return line;
                 }
+                case "fist":
+                {
+                    // Mid-script fist selection. The header form takes none/current too; a
+                    // frames-section line must name the arm it wants to switch to.
+                    if (tokens.Length != 2)
+                        throw new TasParseException(lineNumber, raw,
+                            "fist needs one arm: fist parry or fist knuckleblaster");
+                    TasStartFist target = ParseStartFist(tokens[1], lineNumber, raw);
+                    if (target == TasStartFist.Unchanged)
+                        throw new TasParseException(lineNumber, raw,
+                            "fist in the frames section needs parry or knuckleblaster");
+                    return new TasFrameLine
+                    {
+                        Kind = TasFrameKind.Fist,
+                        FistTarget = target,
+                        Count = 0,
+                        SourceLine = lineNumber
+                    };
+                }
                 case "norefresh":
                 {
                     return new TasFrameLine
@@ -2528,12 +2741,15 @@ namespace UltrakillTAS
                 case "look_at":
                     return ParseLookAt(tokens, lineNumber, raw);
                 case "bake_start":
+                case "bake_start_nme":
                 {
-                    // bake_start [name]: the name becomes part of the .ukbake file name, so it is
-                    // one token of letters, digits, '-', '_' or '.'.
+                    // bake_start [name] / bake_start_nme [name]: the name becomes part of the .ukbake
+                    // file name, so it is one token of letters, digits, '-', '_' or '.'.
+                    bool excludeMapElements = string.Equals(keyword, "bake_start_nme", StringComparison.OrdinalIgnoreCase);
+                    string command = excludeMapElements ? "bake_start_nme" : "bake_start";
                     if (tokens.Length > 2)
                         throw new TasParseException(lineNumber, raw,
-                            "bake_start takes at most one name: bake_start [name]");
+                            command + " takes at most one name: " + command + " [name]");
                     string name = tokens.Length > 1 ? tokens[1] : string.Empty;
                     for (int c = 0; c < name.Length; c++)
                     {
@@ -2547,6 +2763,7 @@ namespace UltrakillTAS
                         Kind = TasFrameKind.BakeStart,
                         Count = 0,
                         BakeName = name,
+                        BakeExcludeMapElements = excludeMapElements,
                         SourceLine = lineNumber
                     };
                 }
@@ -2591,7 +2808,7 @@ namespace UltrakillTAS
                 default:
                     throw new TasParseException(lineNumber, raw,
                         "unknown statement '" + keyword +
-                        "' (expected an 8-field framebulk, save, seed, change yaw|pitch to <v> over <t> s, target_yaw, look_at, norefresh, FFF, bake_start, bake_end, record_video or record_video_stop)");
+                        "' (expected an 8-field framebulk, save, seed, change yaw|pitch to <v> over <t> s, target_yaw, fist, look_at, norefresh, FFF, bake_start, bake_start_nme, bake_end, record_video or record_video_stop)");
             }
         }
 

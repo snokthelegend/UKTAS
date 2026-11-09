@@ -13,20 +13,26 @@ namespace UltrakillTAS
         OptimConfig _optimConfig;
         OptimBoxSet _optimBoxes;
         TasOptimizer _optimizer;
+        List<OptimSample> _optimPushedBaseline, _optimPushedBest, _optimPushedCandidate;
+        bool _optimPathPushed;
+        int _optimPathVersion = -1;
         string _optimStartText = "0";
         string _optimEndText = "0";
+        string _optimMutateEndText = "0";
         string _optimConstraintValue = "0";
         int _optimConstraintIndex = -1;
         readonly string[] _optimObjectiveLabels =
         {
             "Reach Goal Box", "Position X", "Position Y", "Position Z", "Velocity X", "Velocity Y",
-            "Velocity Z", "Speed XZ", "Speed 3D", "Distance to Point"
+            "Velocity Z", "Speed XZ", "Speed 3D", "Distance to Point", "SSJ Boost",
+            "Player Health (hp)", "Hard Damage", "Net Health Gained (hp_delta)"
         };
         readonly OptimObjective[] _optimObjectives =
         {
             OptimObjective.ReachGoalFastest, OptimObjective.PosX, OptimObjective.PosY, OptimObjective.PosZ,
             OptimObjective.VelX, OptimObjective.VelY, OptimObjective.VelZ, OptimObjective.SpeedXZ,
-            OptimObjective.Speed3D, OptimObjective.DistanceToGoal
+            OptimObjective.Speed3D, OptimObjective.DistanceToGoal, OptimObjective.SSJ,
+            OptimObjective.Health, OptimObjective.HardDamage, OptimObjective.HealthDelta
         };
 
         void EnsureOptimizerState()
@@ -56,24 +62,59 @@ namespace UltrakillTAS
             DrawOptimizerWindow();
             DrawOptimizerObjective();
             DrawOptimizerMutations();
+            DrawOptimizerGeometry();
             DrawOptimizerBoxes();
             DrawOptimizerControl();
         }
 
         /// <summary>Feeds the 3-path overlay and the spatial boxes to TrajectoryManager every frame.</summary>
-        void PushOptimizerOverlay()
+        /// <remarks>Called from Plugin's frame loop, not only from OnGUI, so the current best path is
+        /// available in freecam and while the TAS window is hidden.</remarks>
+        public void PushOptimizerOverlay()
         {
             if (_plugin == null || _plugin.Trajectory == null || _optimBoxes == null)
                 return;
             _plugin.Trajectory.SetOptimizerBoxes(_optimBoxes);
+            _plugin.Trajectory.SetOptimizerGeometry(_optimizer != null ? _optimizer.LastGeometry : null,
+                                                      _optimConfig != null && _optimConfig.GeometryShowWhiskers);
             if (_optimizer == null)
             {
-                _plugin.Trajectory.SetOptimizerPaths(null, null, null);
+                if (_optimPathPushed)
+                {
+                    _plugin.Trajectory.SetOptimizerPaths(null, null, null);
+                    _optimPathPushed = false;
+                    _optimPushedBaseline = _optimPushedBest = _optimPushedCandidate = null;
+                    _optimPathVersion = _plugin.Trajectory.OptimizerPathVersion;
+                }
                 return;
             }
-            _plugin.Trajectory.SetOptimizerPaths(PositionsOf(_optimizer.BaselineSamples),
-                                                 PositionsOf(_optimizer.BestSamples),
-                                                 PositionsOf(_optimizer.LastCandidateSamples));
+            List<OptimSample> baseline = _optimizer.BaselineSamples;
+            List<OptimSample> best = _optimizer.BestSamples;
+            List<OptimSample> candidate = _optimizer.LastCandidateSamples;
+            int pathVersion = _plugin.Trajectory.OptimizerPathVersion;
+            if (_optimPathPushed && pathVersion == _optimPathVersion &&
+                ReferenceEquals(baseline, _optimPushedBaseline) &&
+                ReferenceEquals(best, _optimPushedBest) && ReferenceEquals(candidate, _optimPushedCandidate))
+                return;
+            _plugin.Trajectory.SetOptimizerPaths(PositionsOf(baseline), PositionsOf(best), PositionsOf(candidate));
+            _optimPushedBaseline = baseline;
+            _optimPushedBest = best;
+            _optimPushedCandidate = candidate;
+            _optimPathVersion = _plugin.Trajectory.OptimizerPathVersion;
+            _optimPathPushed = true;
+        }
+
+        void ClearOptimizerPaths()
+        {
+            if (_optimizer != null)
+                _optimizer.ClearPaths();
+            _optimPushedBaseline = _optimPushedBest = _optimPushedCandidate = null;
+            _optimPathPushed = false;
+            _optimPathVersion = -1;
+            if (_plugin != null && _plugin.Trajectory != null)
+                _plugin.Trajectory.ClearOptimizerPaths();
+            if (_plugin != null)
+                _plugin.Toast("Optimizer paths cleared.", false);
         }
 
         static List<Vector3> PositionsOf(List<OptimSample> samples)
@@ -152,6 +193,48 @@ namespace UltrakillTAS
             EndCard();
         }
 
+        /// <summary>Geometry awareness: switch, guidance strength, last-obstacle readout and probe overlay.</summary>
+        void DrawOptimizerGeometry()
+        {
+            BeginCard("Geometry awareness");
+            _optimConfig.GeometryAwareness = Tog(_optimConfig.GeometryAwareness,
+                "Enable Obstacle & Corner Awareness (Smart Steering)",
+                "After a wall bonk, probe the static map around the impact and steer the next candidates around the corner or doorway instead of rolling blind yaw.");
+            _optimConfig.GeometryGuidanceBias = Slide(_optimConfig.GeometryGuidanceBias, 0.1f, 1.0f,
+                "Geometry Guidance Bias: 1.0 always tries a clearance-guided candidate after a bonk; 0.1 mostly keeps exploring.",
+                GUILayout.Width(220));
+            _optimConfig.GeometryShowWhiskers = Tog(_optimConfig.GeometryShowWhiskers,
+                "Show Geometry Probe Whiskers",
+                "Draw the last attempt's 360-degree probe fan: red = wall hit, bright green = chosen clearance, yellow = corner/doorway threshold.");
+
+            OptimGeometryProbe probe = _optimizer != null ? _optimizer.LastGeometry : null;
+            if (probe != null && probe.HasImpact)
+            {
+                Hint("Last Obstacle: Wall at Tick " + probe.Tick + " | Clearance: " + probe.ClearanceLabel() +
+                     " | Distance to Corner: " + (probe.CornerFound
+                         ? probe.CornerDistance.ToString("0.0", CultureInfo.InvariantCulture) + "m"
+                         : "none"));
+                Hint("Target: " + (probe.GoalDefined
+                    ? (probe.GoalVisible ? "goal box visible around the edge" : "goal box blocked")
+                    : "movement axis") +
+                    " | Impact: " + probe.ImpactPosition.x.ToString("0.0", CultureInfo.InvariantCulture) + ", " +
+                    probe.ImpactPosition.y.ToString("0.0", CultureInfo.InvariantCulture) + ", " +
+                    probe.ImpactPosition.z.ToString("0.0", CultureInfo.InvariantCulture));
+                Hint("Vertical clearance: floor " +
+                     (probe.FloorHit ? probe.FloorDistance.ToString("0.0", CultureInfo.InvariantCulture) + "m" : "open") +
+                     " | ceiling " +
+                     (probe.CeilingHit ? probe.CeilingDistance.ToString("0.0", CultureInfo.InvariantCulture) + "m" : "open") +
+                     " | Speed priority: " + _optimConfig.SpeedPriority);
+            }
+            else
+            {
+                Hint("No wall bonk detected yet. Run the optimizer; a >60% horizontal speed drop under movement input is probed automatically.");
+            }
+            if (!_optimConfig.GeometryAwareness)
+                Hint("Smart steering is off: mutation uses the sweep/random generator only.");
+            EndCard();
+        }
+
         void PlaceBoxAtCrosshair(OptimBoxKind kind)
         {
             Camera cam = Camera.main;
@@ -210,12 +293,17 @@ namespace UltrakillTAS
             _optimMarkerEnd = markerEnd;
             _optimStartText = markerStart.ToString(CultureInfo.InvariantCulture);
             _optimEndText = markerEnd.ToString(CultureInfo.InvariantCulture);
+            if (string.IsNullOrEmpty(_optimMutateEndText) || _optimMutateEndText == "0")
+                _optimMutateEndText = _optimEndText;
         }
 
         void DrawOptimizerWindow()
         {
             SyncOptimizerMarkerFields();
             BeginCard("Optimization window");
+            if (string.IsNullOrEmpty(_optimMutateEndText) || _optimMutateEndText == "0")
+                _optimMutateEndText = _optimEndText;
+
             GUILayout.BeginHorizontal();
             Lbl("Start Tick", "First tick of the segment to optimize.", GUILayout.Width(90));
             _optimStartText = Field(_optimStartText, "Start tick.", GUILayout.Width(90));
@@ -224,11 +312,21 @@ namespace UltrakillTAS
             GUILayout.EndHorizontal();
 
             GUILayout.BeginHorizontal();
-            Lbl("End Tick", "Last tick of the segment (exclusive).", GUILayout.Width(90));
-            _optimEndText = Field(_optimEndText, "End tick.", GUILayout.Width(90));
-            if (Btn("Current", "Use the current tick as the end.", GUILayout.Width(80)))
+            Lbl("Mutate Until Tick", "Mutations are confined to Start Tick..this tick.", GUILayout.Width(110));
+            _optimMutateEndText = Field(_optimMutateEndText, "End of the mutation window.", GUILayout.Width(90));
+            if (Btn("Current", "Use the current tick as the mutation end.", GUILayout.Width(80)))
+                _optimMutateEndText = _engine.CurrentTick.ToString(CultureInfo.InvariantCulture);
+            GUILayout.EndHorizontal();
+
+            GUILayout.BeginHorizontal();
+            Lbl("Evaluate At Tick", "Simulation and scoring continue to this tick (exclusive). The baseline frames after the mutation window are played unchanged.", GUILayout.Width(110));
+            _optimEndText = Field(_optimEndText, "Evaluation tick.", GUILayout.Width(90));
+            if (Btn("Current", "Use the current tick as the evaluation end.", GUILayout.Width(80)))
                 _optimEndText = _engine.CurrentTick.ToString(CultureInfo.InvariantCulture);
             GUILayout.EndHorizontal();
+
+            if (Btn("Sync Eval to Mutate End", "Set Evaluate At Tick = Mutate Until Tick for standard 1:1 optimization.", GUILayout.Width(210)))
+                _optimEndText = _optimMutateEndText;
 
             GUILayout.Label("Rollback");
             _optimConfig.RollbackFullReplay = ChoiceRow(_optimConfig.RollbackFullReplay ? 1 : 0,
@@ -251,7 +349,16 @@ namespace UltrakillTAS
             GUILayout.BeginHorizontal();
             Lbl("Target", "What the optimizer tries to improve.", GUILayout.Width(90));
             if (Btn(_optimObjectiveLabels[objIndex] + "  ▾", "Click to cycle the target variable.", GUILayout.Width(220)))
-                _optimConfig.Objective = _optimObjectives[(objIndex + 1) % _optimObjectives.Length];
+            {
+                OptimObjective next = _optimObjectives[(objIndex + 1) % _optimObjectives.Length];
+                _optimConfig.Objective = next;
+                // Match the direction the new target is normally used with; the toggle below
+                // still overrides it for the current run.
+                if (next == OptimObjective.HardDamage)
+                    _optimConfig.Direction = OptimDirection.Minimize;
+                else if (next == OptimObjective.Health || next == OptimObjective.HealthDelta)
+                    _optimConfig.Direction = OptimDirection.Maximize;
+            }
             GUILayout.EndHorizontal();
 
             GUILayout.BeginHorizontal();
@@ -260,6 +367,16 @@ namespace UltrakillTAS
                 new[] { "Maximize", "Minimize" }, new[] { "Bigger is better.", "Smaller is better." }, 0f) == 1
                 ? OptimDirection.Minimize : OptimDirection.Maximize;
             GUILayout.EndHorizontal();
+
+            GUILayout.BeginHorizontal();
+            Lbl("Speed priority", "Which speed axis the search should favour.", GUILayout.Width(90));
+            _optimConfig.SpeedPriority = (OptimSpeedPriority)ChoiceRow((int)_optimConfig.SpeedPriority,
+                new[] { "Balanced", "Horizontal", "Vertical" },
+                new[] { "Score the full 3D velocity vector; adaptive credit stays horizontal.",
+                        "Weight horizontal speed and protect horizontal acceleration zones.",
+                        "Weight vertical speed, protect slam/jump acceleration, and let geometry guidance add vertical actions." }, 0f);
+            GUILayout.EndHorizontal();
+            Hint("Speed priority applies to Speed 3D, Reach Goal entry ties, adaptive credit, and geometry-guided actions. Speed XZ and numeric constraints keep their raw values.");
 
             GUILayout.Label("Evaluation scope");
             _optimConfig.Scope = ChoiceRow((int)_optimConfig.Scope,
@@ -311,6 +428,29 @@ namespace UltrakillTAS
         void DrawOptimizerMutations()
         {
             OptimMutationSettings m = _optimConfig.Mutations;
+
+            BeginCard("Search strategy");
+            _optimConfig.SearchMode = (OptimSearchMode)ChoiceRow((int)_optimConfig.SearchMode,
+                new[] { "Sweep + Random", "Sweep Only", "Random Only", "Adaptive ML" },
+                new[] { "Test one framebulk at a time; add random candidates when a pass finds nothing.",
+                        "Deterministic sweep only. Repeatable, and the best way to polish a route.",
+                        "Random mutations only. The old behaviour: samples the whole segment.",
+                        "Learn which mutations score: a UCB1 bandit picks the operator, an elite pool breeds by crossover." }, 0f);
+            _optimConfig.TrimRedundantInputs = Tog(_optimConfig.TrimRedundantInputs, "Trim Redundant Inputs",
+                "Accept a candidate at the same score when it presses fewer keys (BXT's optimizer minimize step).");
+            if (_optimConfig.SearchMode == OptimSearchMode.Adaptive)
+            {
+                _optimConfig.AdaptiveRouteRetryLimit = Mathf.RoundToInt(Slide(_optimConfig.AdaptiveRouteRetryLimit,
+                    1f, 30f, "Generations without a new best before loading the current best and mutating from there.",
+                    GUILayout.Width(260)));
+                Hint("Adaptive ML: a UCB1 bandit concentrates attempts on the operators that score, and 40% of generations splice two elite parents (early ticks of one, exit ticks of the other).");
+            }
+            else if (_optimConfig.SearchMode == OptimSearchMode.Random)
+                Hint("Random mode samples the whole segment; every attempt is a fresh roll.");
+            else
+                Hint("Sweep retries the same framebulk after each improvement, then moves on. Steps halve after a pass with no gain.");
+            EndCard();
+
             BeginCard("Mutations");
             m.MutateYaw = Tog(m.MutateYaw, "Mutate Yaw", "Change yaw on framebulks.");
             if (m.MutateYaw) m.YawStep = Slide(m.YawStep, 0.1f, 25f, "Max yaw change per attempt (deg).", GUILayout.Width(220));
@@ -323,14 +463,41 @@ namespace UltrakillTAS
                 m.KeepTotalTicks = Tog(m.KeepTotalTicks, "Keep total segment ticks", "Borrow ticks from another bulk so the segment length stays fixed.");
             }
             m.MutateMovement = Tog(m.MutateMovement, "Mutate Movement Keys (WASD / flrb)", "Toggle movement keys in field 2.");
-            m.MutateDashSlide = Tog(m.MutateDashSlide, "Mutate Dash & Slide (d, s)", "Toggle dash and slide in field 2.");
+            m.MutateDash = Tog(m.MutateDash, "Mutate Dash (d)", "Toggle dash in field 2.");
+            m.MutateSlide = Tog(m.MutateSlide, "Mutate Slide (s)", "Toggle slide in field 2.");
             m.MutateJump = Tog(m.MutateJump, "Mutate Jump (j)", "Toggle jump in field 3.");
+            m.MutateSSJ = Tog(m.MutateSSJ, "Mutate Slide-Stop Jump (SSJ)",
+                "Split a 3+ tick bulk into slide / wait one tick / jump. The jump must be grounded and 1-3 frames after StopSlide.");
+            _optimConfig.ForceSSJ = Tog(_optimConfig.ForceSSJ, "Force SSJ (fill the route)",
+                "Spend the attempts on the slide / release / jump pattern first, and only on bulks the sampled frames can turn into an SSJ. Works even when the SSJ mutation is off. In Adaptive ML it is one of the learned operators.");
+            m.MutateJumpSlide = Tog(m.MutateJumpSlide, "Mutate Jump-Slide (Dive)",
+                "Split a bulk into a grounded jump tick then a slide tick. The game only starts an air slide right after a jump.");
+            m.MutateAutoJump = Tog(m.MutateAutoJump, "Mutate AutoJump (j)",
+                "Toggle autojump independently in field 1.");
+            m.MutateAutoSlide = Tog(m.MutateAutoSlide, "Mutate AutoSlide (s)",
+                "Toggle autoslide independently in field 1.");
+            m.MutateAutoDash = Tog(m.MutateAutoDash, "Mutate AutoDash (d)",
+                "Toggle autodash independently; it is the only autofunc that spends stamina.");
+            m.MutateGroundSlam = Tog(m.MutateGroundSlam, "Mutate Auto Ground Slam (g)",
+                "Toggle the auto ground-slam autofunc independently in field 1.");
+            m.MutateSSJMacro = Tog(m.MutateSSJMacro, "Mutate SSJ Macro (m)",
+                "Toggle the SSJ macro autofunc independently in field 1.");
+            m.MutateCoinAim = Tog(m.MutateCoinAim, "Mutate Coin Aim (c)",
+                "Toggle the coin aim autofunc independently in field 1.");
+            m.MutateWhipAssist = Tog(m.MutateWhipAssist, "Mutate Whip Assist (w)",
+                "Toggle the whiplash aim assist autofunc independently in field 1.");
+            m.MutateCoinThrow = Tog(m.MutateCoinThrow, "Mutate Coin Throw (t)",
+                "Toggle the first-tick coin throw autofunc independently. Off by default.");
+            m.MutateDeadcoin = Tog(m.MutateDeadcoin, "Mutate Deadcoin (e)",
+                "Toggle the first-tick deadcoin autofunc independently. Off by default.");
+            m.MutateSingleTick = Tog(m.MutateSingleTick, "Mutate Single Ticks",
+                "Split a 2+ tick bulk and change one tick of it. Bulks with commands are skipped.");
             m.MutateCombat = Tog(m.MutateCombat, "Mutate Combat (1, 2, p, v)", "Off by default.");
             m.MutateWeapons = Tog(m.MutateWeapons, "Mutate Weapon Switches", "Off by default.");
             _optimConfig.ProjectileAwareness = Tog(_optimConfig.ProjectileAwareness,
                 "Lock Shots to Airborne Projectiles/Coins", "Aim firing frames at the tracked grenade or coin.");
             m.BulksPerIteration = Mathf.RoundToInt(Slide(m.BulksPerIteration, 1f, 4f, "Framebulks mutated per attempt.", GUILayout.Width(220)));
-            Hint("Single-Frame Mode is not implemented (splitting bulks into 1-tick frames).");
+            Hint("Sweep focuses one framebulk per attempt; random mode uses the count above.");
             EndCard();
         }
 
@@ -343,7 +510,22 @@ namespace UltrakillTAS
                 StartOptimizer();
             if (running && BtnDanger("STOP OPTIMIZER", "Stop the search and keep the best found.", GUILayout.Width(180)))
                 _engine.StopOptimizerRun();
+            if (Btn("Clear Paths", "Clear the baseline, current best and live candidate paths from the 3D view.", GUILayout.Width(100)))
+                ClearOptimizerPaths();
             GUILayout.EndHorizontal();
+
+            int windowStart = _optimizer != null ? _optimizer.Config.StartTick : ParseTickField(_optimStartText, 0);
+            int windowEval = _optimizer != null ? _optimizer.Config.EndTick : ParseTickField(_optimEndText, 0);
+            int windowMutate = _optimizer != null
+                ? _optimizer.EffectiveMutationEndTick
+                : ParseTickField(_optimMutateEndText, windowEval);
+            if (windowMutate <= windowStart || windowMutate > windowEval)
+                windowMutate = windowEval;
+            if (windowEval > windowStart)
+                GUILayout.Label("Window: Mutating Ticks " + windowStart + ".." + windowMutate +
+                                " (" + (windowMutate - windowStart) + " ticks) | Evaluating at Tick " +
+                                windowEval + " (+" + (windowEval - windowMutate) + " lookahead)");
+            DrawOptimizerHealthTelemetry();
 
             if (_engine.OptimizerRunning)
             {
@@ -360,6 +542,28 @@ namespace UltrakillTAS
                 double invalidPct = _optimizer.Iterations > 0 ? 100.0 * _optimizer.InvalidCount / _optimizer.Iterations : 0.0;
                 GUILayout.Label("Speed: " + rate.ToString("0.0", CultureInfo.InvariantCulture) + " it/s (" +
                                 invalidPct.ToString("0", CultureInfo.InvariantCulture) + "% invalid) | Attempts: " + _optimizer.Iterations);
+                if (_optimConfig.SearchMode == OptimSearchMode.Adaptive)
+                {
+                    GUILayout.Label("ML Strategy: Generation " + _optimizer.Generation + " | Pop: " +
+                                    _optimizer.EliteCount + "/" + TasOptimizer.EliteCapacity);
+                    GUILayout.Label("Top Operators: " + _optimizer.TopOperatorLine);
+                    string consensus = "ML Consensus: " + _optimizer.ConsensusPercent +
+                                       "% of route locked by elite agreement";
+                    if (!_optimizer.ConsensusFrozen && _optimizer.EliteCount >= 2)
+                        consensus += " (thawed)";
+                    GUILayout.Label(consensus);
+                    GUILayout.Label("Active Learning: Differential Trend Extrapolation " +
+                                    (_optimizer.DifferentialActive ? "active" : "idle") + " | " +
+                                    _optimizer.WinningComboCount + " Combos mined");
+                    GUILayout.Label("Stagnation: " + _optimizer.StagnantAttempts + "/100 attempts");
+                    if (_optimizer.StagnationPivotActive)
+                        GUILayout.Label("[STAGNATION: PIVOTING TO ALTERNATIVE ROUTE]");
+                    if (!string.IsNullOrEmpty(_optimizer.FailureStatusLine))
+                        GUILayout.Label(_optimizer.FailureStatusLine);
+                }
+                if (!string.IsNullOrEmpty(_optimizer.PhaseText) || _optimizer.TrimmedCount > 0)
+                    Hint("Phase: " + (string.IsNullOrEmpty(_optimizer.PhaseText) ? "baseline" : _optimizer.PhaseText) +
+                         (_optimizer.TrimmedCount > 0 ? "  |  trimmed: " + _optimizer.TrimmedCount : string.Empty));
                 DrawOptimizerBestBlock();
                 foreach (string line in _optimizer.Log)
                     Hint(line);
@@ -376,6 +580,32 @@ namespace UltrakillTAS
                 SaveAsNewBranch();
             DrawOptimizerSegmentBox();
             EndCard();
+        }
+
+        /// <summary>Live health readout while a health-related objective is selected.</summary>
+        void DrawOptimizerHealthTelemetry()
+        {
+            if (_optimizer == null || _optimConfig == null || !IsHealthObjective(_optimConfig.Objective))
+                return;
+            GUILayout.Label("Baseline HP: " + LastHealthText(_optimizer.BaselineSamples, false) +
+                            " -> Best HP: " + LastHealthText(_optimizer.BestSamples, false) +
+                            " (Hard Damage: " + LastHealthText(_optimizer.BestSamples, true) + ")");
+        }
+
+        static string LastHealthText(List<OptimSample> samples, bool hardDamage)
+        {
+            if (samples == null || samples.Count == 0)
+                return "n/a";
+            OptimSample sample = samples[samples.Count - 1];
+            float value = hardDamage ? sample.HardDamage : sample.Health;
+            return value.ToString("0.#", CultureInfo.InvariantCulture);
+        }
+
+        static bool IsHealthObjective(OptimObjective objective)
+        {
+            return objective == OptimObjective.Health ||
+                   objective == OptimObjective.HardDamage ||
+                   objective == OptimObjective.HealthDelta;
         }
 
         // ------------------------------------------------------------------
@@ -531,6 +761,9 @@ namespace UltrakillTAS
             Hint("Baseline: " + FormatOptimScore(_optimizer.BaselineScore) +
                  "  |  Total vs baseline: " + FormatOptimDelta(sinceBaseline) +
                  (_optimHasImprovement ? "  |  Last step shown in brackets" : ""));
+            if (_optimizer.BestSSJCount > 0)
+                Hint("Super Slide Jumps: " + _optimizer.BestSSJCount + "  |  best boost: x" +
+                     _optimizer.BestSSJQuality.ToString("0.###", CultureInfo.InvariantCulture));
             GUILayout.EndVertical();
         }
 
@@ -585,6 +818,7 @@ namespace UltrakillTAS
             }
             int start = ParseTickField(_optimStartText, -1);
             int end = ParseTickField(_optimEndText, -1);
+            int mutateEnd = ParseTickField(_optimMutateEndText, -1);
             int markerStart, markerEnd;
             // In-script optim_start / optim_end markers take precedence over the tick fields.
             if (TasOptimizer.ResolveMarkerTicks(_engine.Script, out markerStart, out markerEnd))
@@ -599,8 +833,18 @@ namespace UltrakillTAS
                 _plugin.Toast("Optimizer: set Start Tick below End Tick.", true);
                 return;
             }
+            if (mutateEnd <= start || mutateEnd > end)
+                mutateEnd = end;
+            _optimMutateEndText = mutateEnd.ToString(CultureInfo.InvariantCulture);
             _optimConfig.StartTick = start;
             _optimConfig.EndTick = end;
+            _optimConfig.MutateEndTick = mutateEnd;
+            float originPitch, originYaw;
+            if (_bridge != null && _bridge.TryGetCameraAngles(out originPitch, out originYaw))
+            {
+                _optimConfig.PitchOrigin = originPitch;
+                _optimConfig.YawOrigin = originYaw;
+            }
             List<TasFrameLine> segment;
             string error;
             if (!ExtractSegment(start, end, out segment, out error))
@@ -750,7 +994,8 @@ namespace UltrakillTAS
             {
                 OptimObjective.PosX, OptimObjective.PosY, OptimObjective.PosZ,
                 OptimObjective.VelX, OptimObjective.VelY, OptimObjective.VelZ,
-                OptimObjective.SpeedXZ, OptimObjective.Speed3D
+                OptimObjective.SpeedXZ, OptimObjective.Speed3D, OptimObjective.SSJ,
+                OptimObjective.Health, OptimObjective.HardDamage
             };
             int i = Array.IndexOf(all, v);
             return all[(i + 1) % all.Length];
